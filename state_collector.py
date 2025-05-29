@@ -176,14 +176,11 @@ def serialize_reg_state():
 def prettycorn_hook_code(uc, address, size, user_data):
     global collector
 
-    if collector:
-        collector.get_registers(uc)
-        code = uc.mem_read(address, size)
-        collector.exec_instructions += str(len(code)).encode()
-        collector.exec_instructions += code
-
-    else:
+    if not collector:
         collector = StateCollector(uc._arch, uc._mode)
         collector.define_stack_addr(uc)
-        
-        collector.get_registers(uc)
+
+    collector.get_registers(uc)
+    code = uc.mem_read(address, size)
+    collector.exec_instructions += str(len(code)).encode()
+    collector.exec_instructions += code
