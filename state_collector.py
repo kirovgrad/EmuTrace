@@ -105,6 +105,18 @@ def encode_tuples(tuple_sequence):
     return (k, first_tuple, bitstream, changes)
 
 
+def diff_exec_instructions(previous_snapshot, new_snapshot):
+    return [
+        (i, new_snapshot[i])
+        for i in range(min(len(previous_snapshot), len(new_snapshot)))
+        if previous_snapshot[i] != new_snapshot[i]
+    ] + [
+        (i, new_snapshot[i])
+        for i in range(len(previous_snapshot), len(new_snapshot))
+    ]
+
+
+
 class StateCollector:
     REG_CONFIG = {
         (UC_ARCH_X86, UC_MODE_32): (UC_X86_REG_ESP, UC_X86_REG_EIP, 'x86_reg_list'),
@@ -123,8 +135,10 @@ class StateCollector:
 
         self.reg_state_list = []
         self.exec_instructions = b""
+        self.current_snapshot = b""
 
         self._set_reg_list()
+
 
     def _set_reg_list(self):
         key = (self.arch, self.mode) if (self.arch, self.mode) in self.REG_CONFIG else (self.arch, None)
@@ -144,12 +158,14 @@ class StateCollector:
             for begin, end, perm in uc.mem_regions():
                 if begin <= stack_addr <= end:
                     self.stack = (begin, end, perm)
+                    self.current_snapshot = b"\x00" * (end - begin)
                     uc.hook_add(UC_HOOK_MEM_WRITE, self._hook_stack_write, begin=begin, end=end)
                 else:
                     continue
 
         if self.stack == None:
             print(f"Stack mapping was not found.")
+
 
     def _hook_stack_write(self, uc, access, address, size, value, user_data):
         print(f"Stack write --> {hex(address)} : {hex(value)} : {hex(uc.reg_read(self.instruction_pointer))}")
