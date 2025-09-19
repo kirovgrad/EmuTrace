@@ -134,8 +134,10 @@ class StateCollector:
         self.stack = None
 
         self.reg_state_list = []
+        self.stack_state_list = {}
         self.exec_instructions = b""
-        self.current_snapshot = b""
+        self.initial_snapshot = b""
+        self.code_counter = 0
 
         self._set_reg_list()
 
@@ -158,7 +160,7 @@ class StateCollector:
             for begin, end, perm in uc.mem_regions():
                 if begin <= stack_addr <= end:
                     self.stack = (begin, end, perm)
-                    self.current_snapshot = b"\x00" * (end - begin)
+                    self.initial_snapshot = uc.mem_read(begin, end - begin)
                     uc.hook_add(UC_HOOK_MEM_WRITE, self._hook_stack_write, begin=begin, end=end)
                 else:
                     continue
@@ -169,12 +171,13 @@ class StateCollector:
 
     def _hook_stack_write(self, uc, access, address, size, value, user_data):
         print(f"Stack write --> {hex(address)} : {hex(value)} : {hex(uc.reg_read(self.instruction_pointer))}")
-        pass
+        self.stack_state_list.setdefault(str(self.code_counter), []).append((address, value, self.instruction_pointer))
 
 
     def get_registers(self, uc):
         regs = uc.reg_read_batch(tuple(self.reg_list))
         self.reg_state_list.append(regs)
+        self.code_counter += 1
 
 
     def encode_state(self):
