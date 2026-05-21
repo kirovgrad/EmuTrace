@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EmuTrace Viewer</title>
+<link rel="stylesheet" href="emu_viewer.css">
+</head>
+<body>
+
+<!-- Top bar -->
+<div id="topbar">
+  <div id="logo">emu<span>trace</span></div>
+  <div id="arch-badge">NO TRACE</div>
+  <div id="frame-counter">—</div>
+  <div class="spacer"></div>
+  <div id="pb-controls">
+    <div class="pb-btn" id="pb-first"   title="First frame">⏮</div>
+    <div class="pb-btn" id="pb-prev"    title="Previous (←)">◀</div>
+    <div class="pb-btn" id="pb-play"    title="Play/Pause (Space)">▶</div>
+    <div class="pb-btn" id="pb-next"    title="Next (→)">▶▶</div>
+    <div class="pb-btn" id="pb-last"    title="Last frame">⏭</div>
+  </div>
+  <button class="tb-btn" id="btn-load" onclick="document.getElementById('file-input').click()">
+    ⬆ Load .emtr
+  </button>
+  <input type="file" id="file-input" accept=".emtr">
+</div>
+
+<!-- Search bar -->
+<div id="searchbar">
+  <span style="color:var(--text-dim);font-size:11px;font-family:var(--mono)">FIND:</span>
+  <input type="text" id="search-input" placeholder="address / mnemonic / operand …" spellcheck="false">
+  <div id="search-info"></div>
+</div>
+
+<!-- Frame slider -->
+<div id="slider-bar">
+  <span style="font-family:var(--mono);font-size:10px;color:var(--text-dim)">FRAME</span>
+  <input type="range" id="frame-slider" min="0" max="0" value="0">
+  <div id="slider-label">0 / 0</div>
+</div>
+
+<!-- Main layout -->
+<div id="main">
+
+  <!-- Disassembly panel -->
+  <div class="panel" id="disasm-panel">
+    <div class="panel-title">
+      DISASSEMBLY
+      <span class="badge" id="disasm-badge">0 insns</span>
+    </div>
+    <div id="disasm-scroll">
+      <table id="disasm-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>ADDRESS</th>
+            <th>BYTES</th>
+            <th>MNEMONIC</th>
+            <th>OPERANDS</th>
+          </tr>
+        </thead>
+        <tbody id="disasm-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Right column -->
+  <div id="right-col">
+
+    <!-- Registers panel -->
+    <div id="reg-panel" class="panel" style="border-right:none">
+      <div class="panel-title">REGISTERS</div>
+      <div id="reg-scroll">
+        <table id="reg-table"><tbody id="reg-body"></tbody></table>
+        <div id="flags-area" class="flags-row"></div>
+      </div>
+    </div>
+
+    <!-- Stack panel -->
+    <div id="stack-panel" class="panel" style="border-right:none">
+      <div class="panel-title">
+        STACK
+        <span class="badge" id="stack-badge">SP: —</span>
+      </div>
+      <div id="stack-scroll">
+        <table id="stack-table"><tbody id="stack-body"></tbody></table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Status bar -->
+<div id="statusbar">
+  <span id="status-msg">Drop a .emtr file or click "Load"</span>
+  <span id="status-addr"></span>
+  <span id="status-opcode"></span>
+</div>
+
+<!-- Drop overlay -->
+<div id="drop-overlay">
+  <div id="drop-box">
+    <div id="drop-icon">🔬</div>
+    <div id="drop-title">EmuTrace Viewer</div>
+    <div id="drop-sub">Drop a <code>.emtr</code> file here, or click <strong>Load .emtr</strong></div>
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div id="tooltip"></div>
+
+
+<script src="emu_viewer.js"></script>
+</body>
+</html>
