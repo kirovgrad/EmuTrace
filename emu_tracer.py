@@ -1,10 +1,4 @@
 """
-emu_tracer.py  –  Unicorn Emulation Tracer (collector)
-=======================================================
-Records every executed instruction together with the CPU register state
-and a snapshot of the stack, then serialises everything into a compact
-binary format that can be fed directly into emu_viewer.py.
-
 Supported architectures
 -----------------------
   ARM16   – Thumb / ARM  (UC_ARCH_ARM  + UC_MODE_THUMB)
@@ -33,11 +27,11 @@ Per-frame  (variable size)
   then    stack_block
 
 reg_block
-  [0:2]   n_regs     uint16
+  [0:2]  n_regs    uint16
   repeat n_regs times:
-    [0:1]  name_len  uint8
-    [1:]   name      bytes[name_len]   (ASCII)
-    [n:]   value     uint64
+  [0:1]  name_len  uint8
+  [1:]   name      bytes[name_len]   (ASCII)
+  [n:]   value     uint64
 
 stack_block
   [0:8]   sp_value   uint64
@@ -75,34 +69,22 @@ import zlib
 from enum import IntEnum
 from typing import Dict, List, Tuple
 
-# ---------------------------------------------------------------------------
-# Optional capstone import (used for disassembly in this module if you want
-# to verify; the viewer does its own disassembly)
-# ---------------------------------------------------------------------------
 try:
-    import capstone  # type: ignore
+    import capstone
     HAS_CAPSTONE = True
 except ImportError:
     HAS_CAPSTONE = False
 
-# ---------------------------------------------------------------------------
-# Unicorn imports – these are runtime dependencies
-# ---------------------------------------------------------------------------
 try:
-    import unicorn  # type: ignore
-    import unicorn.arm_const as uc_arm  # type: ignore
-    import unicorn.arm64_const as uc_arm64  # type: ignore
-    import unicorn.x86_const as uc_x86  # type: ignore
-    import unicorn.mips_const as uc_mips  # type: ignore
+    import unicorn
+    import unicorn.arm_const as uc_arm
+    import unicorn.arm64_const as uc_arm64
+    import unicorn.x86_const as uc_x86
+    import unicorn.mips_const as uc_mips
     HAS_UNICORN = True
 except ImportError:
     HAS_UNICORN = False
-    unicorn = None  # type: ignore
-
-
-# ---------------------------------------------------------------------------
-# Architecture catalogue
-# ---------------------------------------------------------------------------
+    unicorn = None
 
 class ARCH(IntEnum):
     ARM16   = 0   # Thumb
@@ -242,18 +224,13 @@ VERSION = 1
 # Header packer: magic(4) + version(4) + arch_id(4) + n_frames(4)
 HDR_STRUCT = struct.Struct("<4sIII")
 
-
-# ---------------------------------------------------------------------------
-# Tracer class
-# ---------------------------------------------------------------------------
-
 class Tracer:
     """
     Attaches to a live Unicorn emulator instance and records a trace.
 
     Parameters
     ----------
-    mu      : unicorn.Uc   – already-configured emulator
+    mu      : unicorn.Uc    – already-configured emulator
     arch    : ARCH          – architecture selector
     stack_capture : int     – how many bytes above SP to snapshot (default 128)
     """
@@ -273,10 +250,6 @@ class Tracer:
         self._sp_name       = SP_REG[arch]
         self._frames: List[bytes] = []
         self._hook_handle   = None
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def attach(self) -> None:
         """Install the instruction hook into the emulator."""
@@ -305,10 +278,6 @@ class Tracer:
     @property
     def frame_count(self) -> int:
         return len(self._frames)
-
-    # ------------------------------------------------------------------
-    # Internal hook callback
-    # ------------------------------------------------------------------
 
     def _on_insn(self, mu, address: int, size: int, user_data) -> None:
         buf = io.BytesIO()
@@ -347,11 +316,6 @@ class Tracer:
         buf.write(stack_raw)
 
         self._frames.append(buf.getvalue())
-
-
-# ---------------------------------------------------------------------------
-# Decoder  (used by the viewer, but also useful standalone)
-# ---------------------------------------------------------------------------
 
 class TraceReader:
     """
@@ -427,11 +391,6 @@ class TraceReader:
             })
 
         self.frames = frames
-
-
-# ---------------------------------------------------------------------------
-# CLI convenience: convert .emtr → JSON  (for debugging)
-# ---------------------------------------------------------------------------
 
 def _to_json(path: str) -> str:
     import json
