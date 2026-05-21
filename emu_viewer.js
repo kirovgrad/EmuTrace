@@ -1,6 +1,5 @@
 // ════════════════════════════════════════════════════════════════════════════
 //  Binary parser for .emtr format
-//  (mirrors emu_tracer.py TraceReader in pure JS)
 // ════════════════════════════════════════════════════════════════════════════
 
 const MAGIC   = 0x52544D45;   // "EMTR" LE
@@ -129,10 +128,6 @@ const CS_ARCH_MODE = {
 };
 
 // Resolves to true once window.cs is fully initialised, false on failure.
-// Capstone.js is an Emscripten module: the script tag fires onload as soon
-// as the JS is parsed, but window.cs (the module object) is only populated
-// after the asm.js / WASM runtime finishes its async init.  We must wait for
-// the module's onRuntimeInitialized callback before using it.
 function loadCapstone() {
   return new Promise((resolve) => {
 
@@ -148,26 +143,17 @@ function loadCapstone() {
       };
       return;
     }
-
-    // Script not injected yet – inject it, then wait for runtime init.
-    // Emscripten checks for a pre-existing Module object; if we put our
-    // callback there before the script runs, it will be called automatically.
+    
     window.Module = window.Module || {};
     window.Module.onRuntimeInitialized = function() {
-      // capstone.js copies itself onto window.cs after init
       resolve(!!(window.cs && window.cs.Capstone));
     };
 
     const s = document.createElement('script');
     s.src = './capstone.min.js';
     s.onerror = () => resolve(false);
-    // Do NOT resolve in onload – the runtime init fires after onload.
-    // onerror is the only synchronous failure path.
     document.head.appendChild(s);
-
-    // Safety timeout: if the module never calls onRuntimeInitialized
-    // (e.g. very old build that uses a different pattern), give up after 5 s.
-    setTimeout(() => resolve(!!(window.cs && window.cs.Capstone)), 500);
+    setTimeout(() => resolve(!!(window.cs && window.cs.Capstone)), 300);
   });
 }
 
@@ -176,8 +162,6 @@ async function disassemble(archId, address, opcodeBytes) {
     try {
       const [arch, mode] = CS_ARCH_MODE[archId] || [3, 1 << 3];
       const ud = new cs.Capstone(arch, mode);
-      // disasm() expects a plain Array of integers (byte values), and a
-      // numeric address.  Do NOT convert bytes to hex strings here.
       const insns = ud.disasm(Array.from(opcodeBytes), address);
       ud.close();
       if (insns && insns.length > 0) {
