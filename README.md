@@ -4,6 +4,8 @@ A binary trace viewer for [Unicorn Engine](https://www.unicorn-engine.org/) emul
 
 Trace every executed instruction together with CPU register state and a snapshot of the stack, then visualise the result in a browser-based disassembly viewer.
 
+![Alt Text](examples/EmuTraceUI.jpg)
+
 ## Components
 
 | File | Description |
