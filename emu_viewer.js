@@ -1,7 +1,3 @@
-// ════════════════════════════════════════════════════════════════════════════
-//  Binary parser for .emtr format
-// ════════════════════════════════════════════════════════════════════════════
-
 const MAGIC   = 0x52544D45;   // "EMTR" LE
 const VERSION = 1;
 
@@ -128,6 +124,10 @@ const CS_ARCH_MODE = {
 };
 
 // Resolves to true once window.cs is fully initialised, false on failure.
+// Capstone.js is an Emscripten module: the script tag fires onload as soon
+// as the JS is parsed, but window.cs (the module object) is only populated
+// after the asm.js / WASM runtime finishes its async init.  We must wait for
+// the module's onRuntimeInitialized callback before using it.
 function loadCapstone() {
   return new Promise((resolve) => {
 
@@ -143,16 +143,25 @@ function loadCapstone() {
       };
       return;
     }
-    
+
+    // Script not injected yet – inject it, then wait for runtime init.
+    // Emscripten checks for a pre-existing Module object; if we put our
+    // callback there before the script runs, it will be called automatically.
     window.Module = window.Module || {};
     window.Module.onRuntimeInitialized = function() {
+      // capstone.js copies itself onto window.cs after init
       resolve(!!(window.cs && window.cs.Capstone));
     };
 
     const s = document.createElement('script');
     s.src = './capstone.min.js';
     s.onerror = () => resolve(false);
+    // Do NOT resolve in onload – the runtime init fires after onload.
+    // onerror is the only synchronous failure path.
     document.head.appendChild(s);
+
+    // Safety timeout: if the module never calls onRuntimeInitialized
+    // (e.g. very old build that uses a different pattern), give up after 5 s.
     setTimeout(() => resolve(!!(window.cs && window.cs.Capstone)), 300);
   });
 }
@@ -162,6 +171,8 @@ async function disassemble(archId, address, opcodeBytes) {
     try {
       const [arch, mode] = CS_ARCH_MODE[archId] || [3, 1 << 3];
       const ud = new cs.Capstone(arch, mode);
+      // disasm() expects a plain Array of integers (byte values), and a
+      // numeric address.  Do NOT convert bytes to hex strings here.
       const insns = ud.disasm(Array.from(opcodeBytes), address);
       ud.close();
       if (insns && insns.length > 0) {
@@ -357,34 +368,54 @@ function selectFrame(idx) {
 //  Register panel
 // ════════════════════════════════════════════════════════════════════════════
 
+function buildRegRow(name, val, prev, spName, pcName, flgName, archId) {
+  const changed = prev && prev[name] !== val;
+  const addrStr = formatAddr(val, archId);
+  let cls = 'reg-val';
+  if (name === spName)  cls += ' reg-sp';
+  if (name === pcName)  cls += ' reg-pc';
+  if (name === flgName) cls += ' reg-flags';
+  if (changed)          cls += ' changed';
+
+  const diff = (changed && prev)
+    ? ` <span style="font-size:10px;color:var(--text-dim)">← ${formatAddr(prev[name], archId)}</span>`
+    : '';
+
+  return `<tr>
+    <td class="reg-name">${escHtml(name)}</td>
+    <td class="${cls}">${addrStr}${diff}</td>
+  </tr>`;
+}
+
 function updateRegs(frame, prev) {
-  const tbody    = document.getElementById('reg-body');
-  const flagsDiv = document.getElementById('flags-area');
-  const spName   = SP_NAMES[trace.archId]  || 'SP';
-  const pcName   = PC_NAMES[trace.archId]  || 'PC';
-  const flgName  = FLAGS_NAMES[trace.archId];
-  const archId   = trace.archId;
+  const leftTbody  = document.getElementById('reg-body-left');
+  const rightTbody = document.getElementById('reg-body-right');
+  const flagsDiv   = document.getElementById('flags-area');
+  const spName     = SP_NAMES[trace.archId]  || 'SP';
+  const pcName     = PC_NAMES[trace.archId]  || 'PC';
+  const flgName    = FLAGS_NAMES[trace.archId];
+  const archId     = trace.archId;
 
-  const rows = [];
-  for (const [name, val] of Object.entries(frame.regs)) {
-    const changed = prev && prev[name] !== val;
-    const addrStr = formatAddr(val, archId);
-    let cls = 'reg-val';
-    if (name === spName)  cls += ' reg-sp';
-    if (name === pcName)  cls += ' reg-pc';
-    if (name === flgName) cls += ' reg-flags';
-    if (changed)          cls += ' changed';
+  const entries = Object.entries(frame.regs);
+  const leftRows = [];
+  const rightRows = [];
 
-    const diff = (changed && prev)
-      ? ` <span style="font-size:10px;color:var(--text-dim)">← ${formatAddr(prev[name], archId)}</span>`
-      : '';
-
-    rows.push(`<tr>
-      <td class="reg-name">${escHtml(name)}</td>
-      <td class="${cls}">${addrStr}${diff}</td>
-    </tr>`);
+  if (entries.length > 22) {
+    const mid = Math.ceil(entries.length / 2);
+    for (let i = 0; i < mid; i++) {
+      leftRows.push(buildRegRow(entries[i][0], entries[i][1], prev, spName, pcName, flgName, archId));
+    }
+    for (let i = mid; i < entries.length; i++) {
+      rightRows.push(buildRegRow(entries[i][0], entries[i][1], prev, spName, pcName, flgName, archId));
+    }
+  } else {
+    for (const [name, val] of entries) {
+      leftRows.push(buildRegRow(name, val, prev, spName, pcName, flgName, archId));
+    }
   }
-  tbody.innerHTML = rows.join('');
+
+  leftTbody.innerHTML = leftRows.join('');
+  rightTbody.innerHTML = rightRows.join('');
 
   // Flags
   if (flgName && frame.regs[flgName] !== undefined) {
