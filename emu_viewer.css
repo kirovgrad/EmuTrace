@@ -288,12 +288,17 @@ body {
   padding: 4px 0;
 }
 #reg-table {
+  display: flex;
+  gap: 10px;
   width: 100%;
+}
+#reg-table-left, #reg-table-right {
+  flex: 1;
   border-collapse: collapse;
   font-family: var(--mono);
   font-size: 12px;
 }
-#reg-table td {
+#reg-table-left td, #reg-table-right td {
   padding: 2px 10px;
 }
 .reg-name {
