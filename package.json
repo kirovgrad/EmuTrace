@@ -21,7 +21,7 @@
   "engines": {
     "node": ">=20"
   },
-  "packageManager": "pnpm@11.19.0",
+  "packageManager": "pnpm@10.18.3",
   "scripts": {
     "test": "node --test tests/core.test.cjs tests/cfg.test.cjs",
     "test:ui": "node tests/viewer.test.cjs && node tests/cfg-viewer.test.cjs",
