@@ -32,10 +32,10 @@ function calls() {
     frame(0x106, "hlt"),
   ];
 }
-function encode(frames) {
+function encode(frames, metadata) {
   const header = Buffer.alloc(16);
   header.write("EMTR");
-  header.writeUInt32LE(2, 4);
+  header.writeUInt32LE(metadata === undefined ? 2 : 3, 4);
   header.writeUInt32LE(frames[0]?.archId ?? 4, 8);
   header.writeUInt32LE(frames.length, 12);
   const chunks = [Buffer.alloc(4)];
@@ -67,6 +67,12 @@ function encode(frames) {
       mnemonic,
       operands,
     );
+  }
+  if (metadata !== undefined) {
+    const json = Buffer.from(JSON.stringify(metadata));
+    const size = Buffer.alloc(4);
+    size.writeUInt32LE(json.length);
+    chunks.push(size, json);
   }
   return Buffer.concat([header, deflateSync(Buffer.concat(chunks))]);
 }

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/kirovgrad/EmuTrace/actions/workflows/ci.yml/badge.svg)](https://github.com/kirovgrad/EmuTrace/actions/workflows/ci.yml)
 
-Inspect Unicorn execution locally, one instruction at a time. Record CPU registers and stack memory, then open a trace in the standalone browser viewer. No server, account, CDN, or upload is required.
+Inspect Unicorn execution locally, one instruction at a time. Record CPU registers and stack memory, explore the current function as disassembly or a control-flow graph, and attach locally generated angr pseudocode. No server, account, CDN, or upload is required.
 
 ![EmuTrace execution inspector](examples/EmuTraceUI.png)
 
@@ -100,6 +100,7 @@ The examples account for SPARC64’s 8 KiB and TriCore’s 16 KiB mapping alignm
 - Virtualized instruction rows and stack bytes for large traces; frame number input, timeline scrubbing, and adjustable playback speed.
 - Address, mnemonic, operand, and opcode search with next/previous matches.
 - A **CFG** tab beside **Disassembly**: basic blocks, labeled conditional edges, execution counts, current-instruction highlighting, and navigation between captured calling contexts.
+- A **Decompilation** tab that follows the currently executing function and displays optional angr pseudocode embedded in an EMTR v3 trace.
 - Frame breakpoints, a breakpoints-only view, and playback that pauses at breakpoints. Breakpoints belong to instruction occurrences and reset when a new file opens.
 - Register previous values, a filter for highlighted changes, architecture-specific flag display, and next/previous change navigation for a selected register.
 - Stack byte comparisons, ASCII, byte order, address execution counts, and selected-frame JSON export.
@@ -133,18 +134,49 @@ This is a **trace-based, partial CFG**. EMTR files contain executed instructions
 
 To keep layout bounded, a graph supports up to 5,000 distinct instructions, 300 nodes (including external destinations), and 1,000 edges. Larger functions remain available in disassembly. The graph is built locally when first opened; it requires no network connection.
 
+## Current-function decompilation
+
+angr runs as an optional local postprocessor because its native Python analysis engine cannot execute inside a browser. Install the pinned decompiler environment with Python 3.12 or newer, then enrich a trace in one command:
+
+```bash
+python3 -m venv .venv-angr
+source .venv-angr/bin/activate
+pip install -r requirements-decompiler.txt
+python3 emu_decompiler.py trace_x86_64.emtr
+```
+
+This reconstructs a sparse code image from the executed instruction bytes. For more complete control flow and better pseudocode, supply the same executable image that Unicorn ran:
+
+```bash
+python3 emu_decompiler.py trace_x86_64.emtr ./program \
+  --output trace_x86_64.decompiled.emtr
+```
+
+Open the generated `*.decompiled.emtr` file and select **Decompilation**. EmuTrace maps every executed address to the function recovered by angr, embeds pseudocode for each reached function, and switches the displayed function as you step through calls and returns. The original trace is never overwritten unless you explicitly choose an output path and pass `--force`.
+
+For a raw code image, specify its Unicorn address and optional entry point:
+
+```bash
+python3 emu_decompiler.py trace_x86_64.emtr code.bin \
+  --blob --base-address 0x10000 --entry-point 0x10000
+```
+
+If Unicorn loaded an executable at a different address than angr, pass its actual load address as `--runtime-base`. Use `python3 emu_decompiler.py --help` for every option.
+
+Decompilation is static and approximate. The trace determines which functions are included and when the viewer shows them. Trace-only analysis cannot discover code on paths that never executed; supplying the original binary gives angr that missing context. Libraries are not automatically loaded. If angr cannot recover or decompile a reached function, the tab reports that failure for its frames instead of fabricating pseudocode. Self-modifying traces require the original binary, and architectures without an angr lifter remain fully usable in Disassembly and CFG views.
+
 ## File format and compatibility
 
-All wire integers are little endian, regardless of the emulated architecture. Both versions begin with a 16-byte uncompressed header:
+All wire integers are little endian, regardless of the emulated architecture. Every version begins with a 16-byte uncompressed header:
 
-| Field            | Type    |
-| ---------------- | ------- |
-| Magic `EMTR`     | 4 bytes |
-| Version (1 or 2) | uint32  |
-| Architecture ID  | uint32  |
-| Frame count      | uint32  |
+| Field           | Type    |
+| --------------- | ------- |
+| Magic `EMTR`    | 4 bytes |
+| Version (1–3)   | uint32  |
+| Architecture ID | uint32  |
+| Frame count     | uint32  |
 
-The remainder is one zlib stream. V2 starts with a uint32 flags word (bit 0: capture limit reached; other bits reserved). V1 has no flags word. Each frame contains:
+The remainder is one zlib stream. V2 and v3 start with a uint32 flags word (bit 0: capture limit reached; other bits reserved). V1 has no flags word. Each frame contains:
 
 ```text
 address            uint64
@@ -158,17 +190,21 @@ stack_address      uint64
 stack_length       uint32
 stack_bytes        bytes[stack_length]
 
-# V2 only, after each frame:
+# V2 and V3, after each frame:
 instruction_arch   uint32
 mnemonic_length    uint16
 operands_length    uint16
 mnemonic           UTF-8[mnemonic_length]
 operands           UTF-8[operands_length]
+
+# V3 only, after all frames:
+metadata_length    uint32
+metadata           UTF-8 JSON object[metadata_length]
 ```
 
-V2 embeds Python Capstone disassembly and the per-instruction architecture. The viewer reads existing v1 files using the bundled legacy `vendor/capstone.min.js`. That older decoder does not contain the newer architectures and its address binding is limited to 32 bits; unsupported instructions or higher addresses are explicitly shown as raw bytes. Newly recorded v2 traces avoid these limitations. A failed decode never invents an instruction.
+V2 embeds Python Capstone disassembly and the per-instruction architecture. V3 adds bounded analysis metadata; `emu_decompiler.py` uses its `decompilation` member. The viewer reads existing v1 files using the bundled legacy `vendor/capstone.min.js`. That older decoder does not contain the newer architectures and its address binding is limited to 32 bits; unsupported instructions or higher addresses are explicitly shown as raw bytes. Newly recorded v2 traces avoid these limitations. A failed decode never invents an instruction.
 
-`tracer.save(path, version=1)` exports the original structure for older viewers, omitting v2 disassembly, mode metadata, and the truncation flag. Old viewers only recognize the original architecture IDs. Neither version is a substitute for emulator state serialization.
+`tracer.save(path, version=1)` exports the original structure for older viewers, omitting v2 disassembly, mode metadata, and the truncation flag. Recording still defaults to v2; v3 is produced when optional analysis metadata is attached. Old viewers only recognize the original architecture IDs. No version is a substitute for emulator state serialization.
 
 ```python
 from emu_tracer import TraceReader

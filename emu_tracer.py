@@ -3,9 +3,11 @@
 EMTR v2 retains the 16-byte v1 header and zlib payload. Each v1 frame
 (address, opcode, named uint64 registers, stack address and bytes) is followed
 by <IHH: instruction architecture ID, mnemonic byte length, operand byte
-length, then both UTF-8 strings. Readers accept v1 and v2. All integers in
-both versions are little endian, independent of the emulated target. V2
-payloads begin with a uint32 flags word (bit 0: capture limit reached).
+length, then both UTF-8 strings. V3 appends a length-prefixed JSON metadata
+object for optional analyses such as angr decompilation. Readers accept all
+three versions. All integers are little endian, independent of the emulated
+target. V2 and v3 payloads begin with a uint32 flags word (bit 0: capture limit
+reached).
 """
 
 from __future__ import annotations
@@ -28,7 +30,55 @@ STACK_CAPTURE_BYTES = 128
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024
 MAX_FRAMES = 1_000_000
 MAX_STACK_BYTES = 1024 * 1024
+MAX_METADATA_BYTES = 16 * 1024 * 1024
 UINT64_MASK = (1 << 64) - 1
+
+
+def _encode_metadata(metadata):
+    if metadata is None:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        raise ValueError("Trace metadata must be an object")
+    try:
+        encoded = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Trace metadata must be JSON serializable") from exc
+    if len(encoded) > MAX_METADATA_BYTES:
+        raise ValueError("Trace metadata exceeds size limit")
+    return encoded
+
+
+def _encode_frame(frame, default_arch):
+    opcode = bytes(frame["opcode"])
+    if not 1 <= len(opcode) <= 32:
+        raise ValueError("Invalid opcode length")
+    regs = frame["regs"]
+    if len(regs) > 512:
+        raise ValueError("Too many registers")
+    buf = io.BytesIO()
+    buf.write(struct.pack("<QH", frame["address"], len(opcode)))
+    buf.write(opcode)
+    buf.write(struct.pack("<H", len(regs)))
+    for name, value in regs.items():
+        encoded = name.encode("ascii")
+        if not name.isidentifier() or not 1 <= len(encoded) <= 255:
+            raise ValueError("Invalid register name")
+        buf.write(struct.pack("<B", len(encoded)) + encoded + struct.pack("<Q", value))
+    stack = bytes(frame["stack"])
+    if len(stack) > MAX_STACK_BYTES:
+        raise ValueError("Stack snapshot exceeds limit")
+    buf.write(struct.pack("<QI", frame["sp"], len(stack)))
+    buf.write(stack)
+    mnemonic = frame.get("mnemonic", "").encode("utf-8")
+    operands = frame.get("operands", "").encode("utf-8")
+    if len(mnemonic) > 0xFFFF or len(operands) > 0xFFFF:
+        raise ValueError("Disassembly text exceeds size limit")
+    extension = (
+        struct.pack("<IHH", int(frame.get("arch", default_arch)), len(mnemonic), len(operands))
+        + mnemonic
+        + operands
+    )
+    return buf.getvalue(), extension
 
 
 class Tracer:
@@ -202,23 +252,30 @@ class Tracer:
         self._payload_size += len(frame) + len(extension)
         self._frames.append((frame, extension))
 
-    def dump(self, *, version=VERSION):
+    def dump(self, *, version=VERSION, metadata=None):
         """Serialize current frames without changing attachment state."""
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             raise ValueError(f"Unsupported version: {version}")
+        if metadata is not None and version != 3:
+            raise ValueError("Trace metadata requires EMTR version 3")
         compressor = zlib.compressobj(level=6)
         chunks = [HDR_STRUCT.pack(MAGIC, version, int(self._arch), self.frame_count)]
-        if version == 2:
+        if version >= 2:
             chunks.append(compressor.compress(struct.pack("<I", int(self.truncated))))
         for frame, extension in self._frames:
             chunks.append(compressor.compress(frame))
-            if version == 2:
+            if version >= 2:
                 chunks.append(compressor.compress(extension))
+        if version == 3:
+            encoded = _encode_metadata(metadata)
+            if self._payload_size + 4 + len(encoded) > MAX_PAYLOAD_BYTES:
+                raise ValueError("Trace and metadata exceed payload size limit")
+            chunks.append(compressor.compress(struct.pack("<I", len(encoded)) + encoded))
         chunks.append(compressor.flush())
         return b"".join(chunks)
 
-    def save(self, path, *, version=VERSION):
-        Path(path).write_bytes(self.dump(version=version))
+    def save(self, path, *, version=VERSION, metadata=None):
+        Path(path).write_bytes(self.dump(version=version, metadata=metadata))
 
 
 class _Cursor:
@@ -245,7 +302,7 @@ class _Cursor:
 
 
 class TraceReader:
-    """Bounded, strict v1/v2 reader. Failed loads retain the previous trace."""
+    """Bounded, strict v1-v3 reader. Failed loads retain the previous trace."""
 
     def __init__(self, *, max_payload_bytes=MAX_PAYLOAD_BYTES, max_frames=MAX_FRAMES):
         if max_payload_bytes < 0 or max_frames < 0:
@@ -258,6 +315,7 @@ class TraceReader:
         self.n_frames = 0
         self.frames = []
         self.truncated = False
+        self.metadata = {}
 
     def load(self, path):
         with open(path, "rb") as file:
@@ -272,7 +330,7 @@ class TraceReader:
         magic, version, arch_id, count = HDR_STRUCT.unpack_from(data)
         if magic != MAGIC:
             raise ValueError("Not an EMTR trace (bad magic)")
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             raise ValueError(f"Unsupported EMTR version: {version}")
         try:
             arch = ARCH(arch_id)
@@ -290,7 +348,7 @@ class TraceReader:
         if not inflater.eof or inflater.unused_data:
             raise ValueError("Truncated or trailing compressed data")
         cur = _Cursor(payload)
-        flags = cur.unpack("<I")[0] if version == 2 else 0
+        flags = cur.unpack("<I")[0] if version >= 2 else 0
         if flags & ~1:
             raise ValueError("Unknown trace flags")
         frames = []
@@ -314,7 +372,7 @@ class TraceReader:
                 raise ValueError("Stack snapshot exceeds limit")
             stack = cur.take(stack_size)
             frame = dict(address=address, opcode=opcode, regs=regs, sp=sp, stack=stack)
-            if version == 2:
+            if version >= 2:
                 frame_arch, mnemonic_size, operands_size = cur.unpack("<IHH")
                 if frame_arch not in ARCHITECTURES:
                     raise ValueError(f"Unknown frame architecture ID: {frame_arch}")
@@ -324,12 +382,54 @@ class TraceReader:
                     operands=cur.text(operands_size),
                 )
             frames.append(frame)
+        metadata = {}
+        if version == 3:
+            (metadata_size,) = cur.unpack("<I")
+            if metadata_size > MAX_METADATA_BYTES:
+                raise ValueError("Trace metadata exceeds size limit")
+            try:
+                metadata = json.loads(cur.text(metadata_size))
+            except json.JSONDecodeError as exc:
+                raise ValueError("Invalid trace metadata JSON") from exc
+            if not isinstance(metadata, dict):
+                raise ValueError("Trace metadata must be an object")
         if cur.offset != len(payload):
             raise ValueError("Unexpected bytes after final frame")
         self.arch, self.arch_name, self.version = arch, ARCH_NAMES[arch], version
         self.n_frames, self.frames = count, frames
         self.truncated = bool(flags & 1)
+        self.metadata = metadata
         return self
+
+    def dump(self, *, version=3, metadata=None):
+        """Serialize a loaded trace, optionally replacing its metadata."""
+        if version not in (1, 2, 3):
+            raise ValueError(f"Unsupported version: {version}")
+        if metadata is not None and version != 3:
+            raise ValueError("Trace metadata requires EMTR version 3")
+        compressor = zlib.compressobj(level=6)
+        chunks = [HDR_STRUCT.pack(MAGIC, version, int(self.arch), self.n_frames)]
+        payload_size = 4 if version >= 2 else 0
+        if version >= 2:
+            chunks.append(compressor.compress(struct.pack("<I", int(self.truncated))))
+        for frame in self.frames:
+            base, extension = _encode_frame(frame, self.arch)
+            chunks.append(compressor.compress(base))
+            payload_size += len(base)
+            if version >= 2:
+                chunks.append(compressor.compress(extension))
+                payload_size += len(extension)
+        if version == 3:
+            encoded = _encode_metadata(self.metadata if metadata is None else metadata)
+            payload_size += 4 + len(encoded)
+            if payload_size > self.max_payload_bytes:
+                raise ValueError("Trace and metadata exceed payload size limit")
+            chunks.append(compressor.compress(struct.pack("<I", len(encoded)) + encoded))
+        chunks.append(compressor.flush())
+        return b"".join(chunks)
+
+    def save(self, path, *, version=3, metadata=None):
+        Path(path).write_bytes(self.dump(version=version, metadata=metadata))
 
 
 def _to_json(path):
@@ -342,6 +442,7 @@ def _to_json(path):
             "n_frames": reader.n_frames,
             "state_timing": "before instruction",
             "truncated": reader.truncated,
+            "metadata": reader.metadata,
             "frames": [
                 {
                     "address": hex(f["address"]),

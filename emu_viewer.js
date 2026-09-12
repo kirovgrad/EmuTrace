@@ -30,6 +30,7 @@ let capstonePromise;
 let searchTimer;
 let scrollRequest;
 let cfgView;
+let decompView;
 
 function status(message, error = false) {
   $("status-msg").textContent = message;
@@ -156,6 +157,7 @@ async function loadBuffer(buffer, name, loadId = ++state.loadId) {
       changeHistory: Emtr.createChangeHistory(trace.frames),
     });
     cfgView.reset(trace);
+    decompView.reset(trace);
     clearTimeout(searchTimer);
     $("search-input").value = "";
     $("search-info").textContent = "";
@@ -322,6 +324,7 @@ function selectFrame(index, { reveal = true } = {}) {
   renderStack();
   updateSearchInfo();
   cfgView.selectionChanged();
+  decompView.selectionChanged();
   $("pb-first").disabled = $("pb-prev").disabled = index === 0;
   $("pb-next").disabled = $("pb-last").disabled =
     index === state.trace.nFrames - 1;
@@ -602,15 +605,18 @@ function followRegister(direction) {
 
 function setExecutionView(view) {
   const isCFG = view === "cfg";
-  $("disassembly-view").hidden = isCFG;
+  const isDecompilation = view === "decompilation";
+  $("disassembly-view").hidden = isCFG || isDecompilation;
   $("cfg-view").hidden = !isCFG;
-  $("execution-filter").hidden = isCFG;
-  for (const name of ["disassembly", "cfg"]) {
+  $("decompilation-view").hidden = !isDecompilation;
+  $("execution-filter").hidden = view !== "disassembly";
+  for (const name of ["disassembly", "cfg", "decompilation"]) {
     $("tab-" + name).setAttribute("aria-selected", String(view === name));
     $("tab-" + name).tabIndex = view === name ? 0 : -1;
   }
   cfgView.activate(isCFG);
-  if (!isCFG && state.trace?.nFrames) selectFrame(state.index);
+  decompView.activate(isDecompilation);
+  if (view === "disassembly" && state.trace?.nFrames) selectFrame(state.index);
 }
 cfgView = createCFGView({
   getState: () => state,
@@ -618,7 +624,12 @@ cfgView = createCFGView({
   openDisassembly: () => setExecutionView("disassembly"),
   toggleBreakpoint,
 });
-for (const name of ["disassembly", "cfg"]) {
+decompView = createDecompView({
+  getState: () => state,
+  setStatus: status,
+});
+const executionViews = ["disassembly", "cfg", "decompilation"];
+for (const name of executionViews) {
   $("tab-" + name).onclick = () => setExecutionView(name);
   $("tab-" + name).onkeydown = (event) => {
     if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
@@ -627,10 +638,13 @@ for (const name of ["disassembly", "cfg"]) {
         event.key === "Home"
           ? "disassembly"
           : event.key === "End"
-            ? "cfg"
-            : name === "cfg"
-              ? "disassembly"
-              : "cfg";
+            ? "decompilation"
+            : executionViews[
+                (executionViews.indexOf(name) +
+                  (event.key === "ArrowLeft" ? -1 : 1) +
+                  executionViews.length) %
+                  executionViews.length
+              ];
       setExecutionView(next);
       $("tab-" + next).focus();
     }

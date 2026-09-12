@@ -3,7 +3,13 @@ const assert = require("node:assert/strict");
 const { deflateSync } = require("node:zlib");
 const fs = require("node:fs");
 const Emtr = require("../emu_core.js");
-function file(payload, count = 1, version = 1, arch = 4) {
+function metadataBlock(metadata) {
+  const json = Buffer.from(JSON.stringify(metadata));
+  const size = Buffer.alloc(4);
+  size.writeUInt32LE(json.length);
+  return Buffer.concat([size, json]);
+}
+function file(payload, count = 1, version = 1, arch = 4, metadata = {}) {
   const header = Buffer.alloc(16);
   header.write("EMTR");
   header.writeUInt32LE(version, 4);
@@ -12,7 +18,13 @@ function file(payload, count = 1, version = 1, arch = 4) {
   const data = Buffer.concat([
     header,
     deflateSync(
-      version === 2 ? Buffer.concat([Buffer.alloc(4), payload]) : payload,
+      version >= 2
+        ? Buffer.concat([
+            Buffer.alloc(4),
+            payload,
+            ...(version === 3 ? [metadataBlock(metadata)] : []),
+          ])
+        : payload,
     ),
   ]);
   return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
@@ -58,6 +70,27 @@ test("v2 preserves embedded disassembly and frame architecture", async () => {
   assert.equal(trace.frames[0].archId, 16);
   assert.equal(trace.frames[0].mnemonic, "addi");
   assert.equal(trace.frames[0].operands, "ra");
+});
+test("v3 carries bounded analysis metadata without changing frames", async () => {
+  const extension = Buffer.alloc(8);
+  extension.writeUInt32LE(4);
+  const metadata = {
+    decompilation: {
+      version: 1,
+      engine: { name: "angr", version: "9.3.4" },
+      functions: [{ address: "0x1000", pseudocode: "void f(void) {}" }],
+    },
+  };
+  const trace = await Emtr.parse(
+    file(Buffer.concat([frame(), extension]), 1, 3, 4, metadata),
+  );
+  assert.equal(trace.version, 3);
+  assert.equal(trace.frames[0].address, 0xffffffffffffffffn);
+  assert.deepEqual(trace.metadata, metadata);
+  await assert.rejects(
+    () => Emtr.parse(file(Buffer.alloc(0), 0, 3, 4, [])),
+    /metadata must be an object/i,
+  );
 });
 test("rejects malformed headers, truncated frames, unknown IDs, and trailing bytes", async () => {
   for (const data of [

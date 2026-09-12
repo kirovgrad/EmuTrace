@@ -196,18 +196,85 @@ const root = path.resolve(__dirname, "..");
       fullPage: true,
     });
     checks++;
-    const load = async (frames, name = "cfg-fixture.emtr") => {
+    const load = async (frames, name = "cfg-fixture.emtr", metadata) => {
       await page.locator("#file-input").setInputFiles({
         name,
         mimeType: "application/octet-stream",
-        buffer: encode(frames),
+        buffer: encode(frames, metadata),
       });
       await page.waitForFunction(
         (name) => document.getElementById("trace-name").textContent === name,
         name,
       );
     };
-    await load(calls(), "calls.emtr");
+    const decompilation = {
+      decompilation: {
+        version: 1,
+        engine: { name: "angr", version: "9.3.4" },
+        binary: { name: "calls.bin" },
+        functions: [
+          {
+            address: "0x100",
+            name: "entry",
+            observed_addresses: ["0x100", "0x105", "0x106"],
+            pseudocode: "int entry(void)\n{\n    return worker();\n}\n",
+          },
+          {
+            address: "0x200",
+            name: "worker",
+            observed_addresses: ["0x200", "0x203", "0x210", "0x215"],
+            pseudocode:
+              "int worker(void)\n{\n    if (rax != 0)\n        leaf();\n    return 0;\n}\n",
+          },
+        ],
+        failures: [
+          {
+            address: "0x300",
+            name: "leaf",
+            observed_addresses: ["0x300", "0x301"],
+            reason: "function is too small",
+          },
+        ],
+        unmapped_addresses: [],
+      },
+    };
+    await load(calls(), "calls.emtr", decompilation);
+    await page.getByRole("tab", { name: "Decompilation", exact: true }).click();
+    assert.equal(await page.locator("#decompilation-view").isVisible(), true);
+    assert.match(
+      await page.locator("#decomp-function").textContent(),
+      /entry · 0x100/,
+    );
+    assert.match(
+      await page.locator("#decomp-code").textContent(),
+      /return worker/,
+    );
+    assert.equal(await page.locator("#decomp-code li").count(), 4);
+    assert.match(
+      await page.locator("#decomp-note").textContent(),
+      /angr 9\.3\.4 · calls\.bin/,
+    );
+    await page.evaluate(() => navigate(1));
+    assert.match(
+      await page.locator("#decomp-function").textContent(),
+      /worker · 0x200/,
+    );
+    await page.screenshot({
+      path: path.join(root, "test-results/decompilation-light.png"),
+      fullPage: true,
+    });
+    await page.evaluate(() => navigate(4));
+    assert.match(
+      await page.locator("#decomp-message-title").textContent(),
+      /leaf could not/,
+    );
+    assert.match(
+      await page.locator("#decomp-message-detail").textContent(),
+      /too small/,
+    );
+    await page.evaluate(() => navigate(0));
+    await page.getByRole("tab", { name: "CFG", exact: true }).click();
+    checks++;
     await page.waitForFunction(() =>
       document
         .querySelector(".cfg-external-link")

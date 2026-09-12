@@ -1107,6 +1107,103 @@ dialog p {
   font-weight: 600;
   box-shadow: inset 0 -2px var(--accent);
 }
+.decomp-toolbar {
+  min-height: 35px;
+  padding: 4px 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.decomp-identity {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+#decomp-function {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 10px var(--mono);
+}
+#decomp-count {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+#decomp-copy {
+  padding: 4px 7px;
+}
+#decomp-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+  outline-offset: -2px;
+}
+.decomp-message {
+  min-height: 100%;
+  max-width: 560px;
+  margin: auto;
+  padding: 55px 28px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.decomp-message strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+#decomp-code {
+  min-width: max-content;
+  margin: 0;
+  padding: 12px 0;
+  list-style: none;
+  counter-reset: decomp-line;
+  font: 11px/18px var(--mono);
+}
+#decomp-code li {
+  min-height: 18px;
+  display: flex;
+  counter-increment: decomp-line;
+}
+#decomp-code li::before {
+  content: counter(decomp-line);
+  width: 46px;
+  padding-right: 10px;
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--muted);
+  background: var(--subtle);
+  user-select: none;
+}
+#decomp-code code {
+  padding: 0 16px;
+  white-space: pre;
+  font: inherit;
+  color: var(--text);
+}
+#decomp-code .keyword {
+  color: var(--code-accent);
+  font-weight: 600;
+}
+#decomp-code .comment {
+  color: var(--muted);
+}
+#decomp-code .number,
+#decomp-code .string {
+  color: var(--accent);
+}
 .cfg-toolbar {
   display: flex;
   align-items: center;
@@ -1361,6 +1458,9 @@ dialog p {
 @media (max-width: 1080px) {
   .execution-tabs {
     gap: 12px;
+  }
+  .decomp-toolbar {
+    padding: 4px 8px;
   }
   .cfg-legend span:last-child {
     display: none;

@@ -12,7 +12,9 @@
   "keywords": [
     "unicorn",
     "capstone",
+    "angr",
     "emulation",
+    "decompiler",
     "disassembly",
     "control-flow-graph"
   ],
@@ -23,8 +25,8 @@
   "scripts": {
     "test": "node --test tests/core.test.cjs tests/cfg.test.cjs",
     "test:ui": "node tests/viewer.test.cjs && node tests/cfg-viewer.test.cjs",
-    "format": "prettier --write README.md package.json emu_viewer.css emu_viewer.html emu_viewer.js emu_core.js emu_cfg.js emu_cfg_view.js \"scripts/*.cjs\" \"tests/*.cjs\" \".github/**/*.yml\"",
-    "format:check": "prettier --check README.md package.json emu_viewer.css emu_viewer.html emu_viewer.js emu_core.js emu_cfg.js emu_cfg_view.js \"scripts/*.cjs\" \"tests/*.cjs\" \".github/**/*.yml\"",
+    "format": "prettier --write README.md package.json emu_viewer.css emu_viewer.html emu_viewer.js emu_core.js emu_cfg.js emu_cfg_view.js emu_decomp_view.js \"scripts/*.cjs\" \"tests/*.cjs\" \".github/**/*.yml\"",
+    "format:check": "prettier --check README.md package.json emu_viewer.css emu_viewer.html emu_viewer.js emu_core.js emu_cfg.js emu_cfg_view.js emu_decomp_view.js \"scripts/*.cjs\" \"tests/*.cjs\" \".github/**/*.yml\"",
     "vendor:cfg": "node scripts/vendor_cfg.cjs"
   },
   "devDependencies": {

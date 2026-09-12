@@ -157,10 +157,12 @@ def frame_payload():
     )
 
 
-def file_bytes(payload=None, count=1, version=1, arch=4):
-    return HDR_STRUCT.pack(b"EMTR", version, arch, count) + zlib.compress(
-        (b"\0" * 4 if version == 2 else b"") + (frame_payload() if payload is None else payload)
-    )
+def file_bytes(payload=None, count=1, version=1, arch=4, metadata=None):
+    body = (b"\0" * 4 if version >= 2 else b"") + (frame_payload() if payload is None else payload)
+    if version == 3:
+        encoded = json.dumps({} if metadata is None else metadata).encode()
+        body += struct.pack("<I", len(encoded)) + encoded
+    return HDR_STRUCT.pack(b"EMTR", version, arch, count) + zlib.compress(body)
 
 
 def test_legacy_roundtrip_and_json_precision(tmp_path):
@@ -174,6 +176,31 @@ def test_legacy_roundtrip_and_json_precision(tmp_path):
         mu.emu_start(0x1000, 0x1004)
     assert TraceReader().loads(tracer.dump(version=1)).version == 1
     assert TraceReader().loads(tracer.dump()).frames[0]["mnemonic"] == ""
+
+
+def test_v3_metadata_and_reader_reserialization():
+    metadata = {"decompilation": {"version": 1, "functions": [{"name": "main"}]}}
+    reader = TraceReader().loads(
+        file_bytes(
+            payload=frame_payload() + struct.pack("<IHH", int(ARCH.X86_64), 0, 0),
+            version=3,
+            metadata=metadata,
+        )
+    )
+    assert reader.version == 3 and reader.metadata == metadata
+    copy = TraceReader().loads(reader.dump())
+    assert copy.metadata == metadata
+    assert copy.frames == reader.frames
+    with pytest.raises(ValueError, match="metadata requires"):
+        reader.dump(version=2, metadata=metadata)
+    with pytest.raises(ValueError, match="JSON serializable"):
+        reader.dump(metadata={"bad": object()})
+
+    mu = engine()
+    with Tracer(mu) as tracer:
+        mu.emu_start(0x1000, 0x1004)
+    captured = TraceReader().loads(tracer.dump(version=3, metadata=metadata))
+    assert captured.n_frames == 2 and captured.metadata == metadata
 
 
 @pytest.mark.parametrize("path", list((ROOT / "examples").glob("*.emtr")))
@@ -202,9 +229,10 @@ def test_existing_traces(path):
 def test_malformed_files_fail_atomically(data):
     reader = TraceReader().loads(file_bytes())
     old_frames = reader.frames
+    old_metadata = reader.metadata
     with pytest.raises(ValueError):
         reader.loads(data)
-    assert reader.frames is old_frames and reader.n_frames == 1
+    assert reader.frames is old_frames and reader.metadata is old_metadata and reader.n_frames == 1
 
 
 def test_decompression_and_frame_limits():

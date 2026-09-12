@@ -52,6 +52,16 @@ function syntheticTrace(count, stackSize = 0) {
     await page.getByRole("button", { name: "Explore an example" }).click();
     await page.waitForFunction(() => state.trace?.nFrames === 37);
     assert.match(await page.locator("#status-msg").textContent(), /Loaded/);
+    await page.getByRole("tab", { name: "Decompilation", exact: true }).click();
+    assert.match(
+      await page.locator("#decomp-message-title").textContent(),
+      /No embedded decompilation/,
+    );
+    assert.match(
+      await page.locator("#decomp-note").textContent(),
+      /emu_decompiler\.py/,
+    );
+    await page.getByRole("tab", { name: "Disassembly", exact: true }).click();
     checks++;
     const go = async (number) => {
       await page.locator("#frame-input").fill(String(number));

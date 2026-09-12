@@ -7,6 +7,7 @@ Thumbs.db
 
 # Python environments, caches, and build output
 .venv/
+.venv-angr/
 __pycache__/
 *.py[cod]
 .pytest_cache/
