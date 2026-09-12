@@ -4,12 +4,14 @@
   "version": "2.0.0",
   "description": "Local Unicorn execution trace inspector",
   "scripts": {
-    "test": "node --test tests/core.test.cjs",
-    "test:ui": "node tests/viewer.test.cjs",
-    "format": "prettier --write emu_viewer.css emu_viewer.html emu_viewer.js emu_core.js \"tests/*.cjs\"",
-    "format:check": "prettier --check emu_viewer.css emu_viewer.html emu_viewer.js emu_core.js \"tests/*.cjs\""
+    "test": "node --test tests/core.test.cjs tests/cfg.test.cjs",
+    "test:ui": "node tests/viewer.test.cjs && node tests/cfg-viewer.test.cjs",
+    "format": "prettier --write emu_viewer.css emu_viewer.html emu_viewer.js emu_core.js emu_cfg.js emu_cfg_view.js \"tests/*.cjs\"",
+    "format:check": "prettier --check emu_viewer.css emu_viewer.html emu_viewer.js emu_core.js emu_cfg.js emu_cfg_view.js \"tests/*.cjs\"",
+    "vendor:cfg": "node scripts/vendor_cfg.cjs"
   },
   "devDependencies": {
+    "@dagrejs/dagre": "1.1.5",
     "playwright": "^1.58.2",
     "prettier": "3.6.2"
   }

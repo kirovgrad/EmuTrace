@@ -29,6 +29,7 @@ const HEADER_HEIGHT = parseFloat(
 let capstonePromise;
 let searchTimer;
 let scrollRequest;
+let cfgView;
 
 function status(message, error = false) {
   $("status-msg").textContent = message;
@@ -154,6 +155,7 @@ async function loadBuffer(buffer, name, loadId = ++state.loadId) {
       hits,
       changeHistory: Emtr.createChangeHistory(trace.frames),
     });
+    cfgView.reset(trace);
     clearTimeout(searchTimer);
     $("search-input").value = "";
     $("search-info").textContent = "";
@@ -319,6 +321,7 @@ function selectFrame(index, { reveal = true } = {}) {
   renderRegisters();
   renderStack();
   updateSearchInfo();
+  cfgView.selectionChanged();
   $("pb-first").disabled = $("pb-prev").disabled = index === 0;
   $("pb-next").disabled = $("pb-last").disabled =
     index === state.trace.nFrames - 1;
@@ -490,6 +493,7 @@ function toggleBreakpoint(index) {
   if (state.breakpoints.has(index)) state.breakpoints.delete(index);
   else state.breakpoints.add(index);
   rebuildVisible();
+  cfgView.refreshBreakpoints();
 }
 function stopPlayback() {
   if (state.timer !== null) clearInterval(state.timer);
@@ -596,6 +600,42 @@ function followRegister(direction) {
   status(`No ${direction > 0 ? "later" : "earlier"} changes to ${name}.`);
 }
 
+function setExecutionView(view) {
+  const isCFG = view === "cfg";
+  $("disassembly-view").hidden = isCFG;
+  $("cfg-view").hidden = !isCFG;
+  $("execution-filter").hidden = isCFG;
+  for (const name of ["disassembly", "cfg"]) {
+    $("tab-" + name).setAttribute("aria-selected", String(view === name));
+    $("tab-" + name).tabIndex = view === name ? 0 : -1;
+  }
+  cfgView.activate(isCFG);
+  if (!isCFG && state.trace?.nFrames) selectFrame(state.index);
+}
+cfgView = createCFGView({
+  getState: () => state,
+  navigate,
+  openDisassembly: () => setExecutionView("disassembly"),
+  toggleBreakpoint,
+});
+for (const name of ["disassembly", "cfg"]) {
+  $("tab-" + name).onclick = () => setExecutionView(name);
+  $("tab-" + name).onkeydown = (event) => {
+    if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      const next =
+        event.key === "Home"
+          ? "disassembly"
+          : event.key === "End"
+            ? "cfg"
+            : name === "cfg"
+              ? "disassembly"
+              : "cfg";
+      setExecutionView(next);
+      $("tab-" + next).focus();
+    }
+  };
+}
 $("open-file").onclick = $("welcome-open").onclick = () =>
   $("file-input").click();
 $("file-input").onchange = (event) => {
@@ -753,7 +793,10 @@ document.addEventListener("keydown", (event) => {
     End: () => navigate((state.trace?.nFrames || 0) - 1),
     b: () => toggleBreakpoint(state.index),
     F2: () => toggleBreakpoint(state.index),
-    "/": () => $("search-input").focus(),
+    "/": () => {
+      setExecutionView("disassembly");
+      $("search-input").focus();
+    },
   };
   if (actions[event.key]) {
     event.preventDefault();

@@ -8,6 +8,9 @@
     <link rel="stylesheet" href="emu_viewer.css" />
     <script defer src="emu_architectures.js"></script>
     <script defer src="emu_core.js"></script>
+    <script defer src="emu_cfg.js"></script>
+    <script defer src="vendor/dagre.min.js"></script>
+    <script defer src="emu_cfg_view.js"></script>
     <script defer src="demo_trace.js"></script>
     <script defer src="emu_viewer.js"></script>
   </head>
@@ -185,8 +188,35 @@
           aria-labelledby="execution-title"
         >
           <div class="panel-heading">
-            <h2 id="execution-title">Execution</h2>
-            <div class="segmented" aria-label="Execution view">
+            <h2 id="execution-title" class="sr-only">Execution</h2>
+            <div
+              class="execution-tabs"
+              role="tablist"
+              aria-label="Execution representation"
+            >
+              <button
+                id="tab-disassembly"
+                role="tab"
+                aria-selected="true"
+                aria-controls="disassembly-view"
+              >
+                Disassembly
+              </button>
+              <button
+                id="tab-cfg"
+                role="tab"
+                aria-selected="false"
+                aria-controls="cfg-view"
+                tabindex="-1"
+              >
+                CFG
+              </button>
+            </div>
+            <div
+              id="execution-filter"
+              class="segmented"
+              aria-label="Execution view"
+            >
               <button id="show-all" class="active" aria-pressed="true">
                 All frames</button
               ><button id="show-breakpoints" aria-pressed="false">
@@ -194,59 +224,133 @@
               </button>
             </div>
           </div>
-          <div class="search-bar">
-            <span aria-hidden="true">⌕</span
-            ><input
-              type="search"
-              id="search-input"
-              placeholder="Find address, instruction, operand, or bytes"
-              aria-label="Search instructions"
-              spellcheck="false"
-            /><span id="search-info" aria-live="polite"></span
-            ><button
-              id="search-prev"
-              class="quiet"
-              title="Previous match (Shift+Enter)"
-              aria-label="Previous search match"
-            >
-              ↑</button
-            ><button
-              id="search-next"
-              class="quiet"
-              title="Next match (Enter)"
-              aria-label="Next search match"
-            >
-              ↓
-            </button>
+          <div
+            id="disassembly-view"
+            class="execution-view"
+            role="tabpanel"
+            aria-labelledby="tab-disassembly"
+          >
+            <div class="search-bar">
+              <span aria-hidden="true">⌕</span
+              ><input
+                type="search"
+                id="search-input"
+                placeholder="Find address, instruction, operand, or bytes"
+                aria-label="Search instructions"
+                spellcheck="false"
+              /><span id="search-info" aria-live="polite"></span
+              ><button
+                id="search-prev"
+                class="quiet"
+                title="Previous match (Shift+Enter)"
+                aria-label="Previous search match"
+              >
+                ↑</button
+              ><button
+                id="search-next"
+                class="quiet"
+                title="Next match (Enter)"
+                aria-label="Next search match"
+              >
+                ↓
+              </button>
+            </div>
+            <div id="disasm-scroll" tabindex="0" aria-label="Instruction list">
+              <table id="disasm-table">
+                <colgroup>
+                  <col class="breakpoint-col" />
+                  <col class="frame-col" />
+                  <col class="address-col" />
+                  <col class="bytes-col" />
+                  <col />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th><span class="sr-only">Breakpoint</span></th>
+                    <th>Frame</th>
+                    <th>Address</th>
+                    <th>Bytes</th>
+                    <th>Instruction</th>
+                  </tr>
+                </thead>
+                <tbody id="disasm-body"></tbody>
+              </table>
+              <p id="empty-list" class="panel-empty" hidden>
+                No breakpoints. Press B to set one on the selected frame.
+              </p>
+            </div>
+            <div class="panel-footer">
+              <span id="execution-caption"
+                >Select a frame to inspect its state</span
+              ><span><kbd>B</kbd> Breakpoint</span>
+            </div>
           </div>
-          <div id="disasm-scroll" tabindex="0" aria-label="Instruction list">
-            <table id="disasm-table">
-              <colgroup>
-                <col class="breakpoint-col" />
-                <col class="frame-col" />
-                <col class="address-col" />
-                <col class="bytes-col" />
-                <col />
-              </colgroup>
-              <thead>
-                <tr>
-                  <th><span class="sr-only">Breakpoint</span></th>
-                  <th>Frame</th>
-                  <th>Address</th>
-                  <th>Bytes</th>
-                  <th>Instruction</th>
-                </tr>
-              </thead>
-              <tbody id="disasm-body"></tbody>
-            </table>
-            <p id="empty-list" class="panel-empty" hidden>
-              No breakpoints. Press B to set one on the selected frame.
-            </p>
-          </div>
-          <div class="panel-footer">
-            <span id="execution-caption"
-              >Select a frame to inspect its state</span
-            ><span><kbd>B</kbd> Breakpoint</span>
+          <div
+            id="cfg-view"
+            class="execution-view"
+            role="tabpanel"
+            aria-labelledby="tab-cfg"
+            hidden
+          >
+            <div class="cfg-toolbar">
+              <div class="cfg-identity">
+                <span id="cfg-function">Current function</span
+                ><span id="cfg-count"></span>
+              </div>
+              <div class="cfg-controls">
+                <button
+                  id="cfg-locate"
+                  class="quiet"
+                  title="Center current block"
+                >
+                  Locate
+                </button>
+                <button
+                  id="cfg-zoom-out"
+                  class="quiet"
+                  aria-label="Zoom graph out"
+                >
+                  −
+                </button>
+                <span id="cfg-zoom">100%</span>
+                <button
+                  id="cfg-zoom-in"
+                  class="quiet"
+                  aria-label="Zoom graph in"
+                >
+                  +
+                </button>
+                <button id="cfg-fit" class="quiet" title="Fit graph to view">
+                  Fit
+                </button>
+              </div>
+            </div>
+            <div
+              id="cfg-viewport"
+              tabindex="0"
+              aria-label="Control-flow graph. Drag background to pan. Click an instruction to inspect it."
+            >
+              <p id="cfg-message" class="panel-empty">
+                Select a frame to view its control flow.
+              </p>
+              <div id="cfg-stage" hidden>
+                <div id="cfg-scene">
+                  <svg id="cfg-edges" aria-hidden="true"></svg>
+                  <div id="cfg-blocks"></div>
+                </div>
+              </div>
+            </div>
+            <div class="cfg-legend">
+              <span><i></i>Observed</span
+              ><span><i class="inferred"></i>Inferred / not captured</span
+              ><span>Double-click an instruction to open disassembly</span>
+            </div>
+            <div class="panel-footer">
+              <span id="cfg-note"
+                >Trace-based CFG · function boundaries inferred from calls and
+                returns</span
+              >
+            </div>
           </div>
         </section>
         <div class="state-column">

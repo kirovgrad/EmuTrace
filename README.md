@@ -93,6 +93,7 @@ The examples account for SPARC64’s 8 KiB and TriCore’s 16 KiB mapping alignm
 - Flat light and dark appearances, compact 18-pixel data rows without separator lines, system fonts, keyboard focus indicators, and a responsive layout.
 - Virtualized instruction rows and stack bytes for large traces; frame number input, timeline scrubbing, and adjustable playback speed.
 - Address, mnemonic, operand, and opcode search with next/previous matches.
+- A **CFG** tab beside **Disassembly**: basic blocks, labeled conditional edges, execution counts, current-instruction highlighting, and navigation between captured calling contexts.
 - Frame breakpoints, a breakpoints-only view, and playback that pauses at breakpoints. Breakpoints belong to instruction occurrences and reset when a new file opens.
 - Register previous values, a filter for highlighted changes, architecture-specific flag display, and next/previous change navigation for a selected register.
 - Stack byte comparisons, ASCII, byte order, address execution counts, and selected-frame JSON export.
@@ -104,11 +105,27 @@ The examples account for SPARC64’s 8 KiB and TriCore’s 16 KiB mapping alignm
 | `→` / `n`, `←` / `p` | Next / previous frame |
 | `Space` | Play / pause |
 | `Home`, `End` | First / last frame |
-| `b` / `F2`, double-click a row | Toggle breakpoint |
+| `b` / `F2`, double-click a disassembly row | Toggle breakpoint |
 | `/` | Focus search |
 | `Enter`, `Shift+Enter` in search | Next / previous match |
 
 Shortcuts do not interfere with text fields, buttons, selects, or the help dialog. The UI uses **one-based** frame numbers; Python frame lists remain zero-based.
+
+## Current-function CFG
+
+Open a trace and select **CFG** in the execution pane. Switch back to **Disassembly** at any time; both tabs share the selected frame and the register/stack inspectors. Repeated instructions collapse into basic blocks. The current block is outlined, and the current instruction is selected.
+
+![EmuTrace control-flow graph](examples/EmuTraceCFG.png)
+
+- **Solid edges** show observed transitions, with counts across all captured invocations of the function, including frames after the selection. Conditional edges are labeled **Taken** and **Not taken**.
+- **Dashed edges** show possible paths inferred from decoded branches but never observed in the trace. Missing destination code appears as a placeholder; it is not disassembled or fabricated.
+- Click an instruction to inspect its occurrence nearest the selected frame. Double-click it to return to disassembly. **B** or **F2** on a focused graph instruction toggles that occurrence's breakpoint; a red dot means at least one occurrence has a breakpoint.
+- Captured callees appear as compact **Called function** links. Click one to inspect its CFG; **Return to caller** links navigate to the recorded return context. Stepping into another function updates the graph automatically.
+- Drag the background to pan; use **− / +**, **Fit**, and **Locate** to zoom or center the current block. Long blocks show a window around the selected instruction and have **Show all / Collapse** controls.
+
+This is a **trace-based, partial CFG**. EMTR files contain executed instructions, not function symbols or a complete binary. Function scopes are inferred from recognized calls and matching returns; the initial scope is labeled **Trace region** because recording may start mid-function. Tail calls, exception transfers, unusual calling conventions, and unrecognized branch mnemonics can prevent accurate function separation. Instructions without decoded mnemonics contribute observed transitions only. Common branch forms across all ten supported families are recognized, including MIPS/SPARC delay slots and Capstone 5's relative RISC-V targets. Multiple captured code versions at the same address remain separate.
+
+To keep layout bounded, a graph supports up to 5,000 distinct instructions, 300 nodes (including external destinations), and 1,000 edges. Larger functions remain available in disassembly. The graph is built locally when first opened; it requires no network connection.
 
 ## File format and compatibility
 
@@ -159,7 +176,7 @@ print(reader.frames[0]["regs"])
 
 ## Development and validation
 
-The viewer has no build step or runtime npm dependencies. Node 20+ and pnpm are only needed for tests and formatting. Run `ruff check .` and `ruff format --check .` for Python, or `pnpm run format:check` for browser code.
+The viewer has no build step or npm installation requirement. Node 20+ and pnpm are only needed for development. CFG layout uses the bundled MIT-licensed [Dagre](vendor/README.md); `pnpm run vendor:cfg` refreshes the unmodified bundle and license notices from locked development dependencies. Run `ruff check .` and `ruff format --check .` for Python, or `pnpm run format:check` for browser code.
 
 ```bash
 pip install -r requirements-dev.txt
@@ -170,6 +187,6 @@ pnpm exec playwright install chromium
 pnpm run test:ui
 ```
 
-To use an installed Chrome binary instead, set `EMUTRACE_BROWSER` to its executable path. The browser suite writes ignored screenshots under `test-results/` and tests direct `file://` loading, zero external requests, legacy decoding, navigation, state comparison, breakpoints, playback, exports, concurrent loads, empty/corrupt files, a 30,000-frame trace, and mobile layout.
+To use an installed Chrome binary instead, set `EMUTRACE_BROWSER` to its executable path. The browser suites write ignored screenshots under `test-results/` and test direct `file://` loading, zero external requests, legacy decoding, navigation, state comparison, breakpoints, playback, exports, concurrent loads, empty/corrupt files, a 30,000-frame trace, and mobile layout. CFG checks cover tab/state synchronization, conditional edges, call/return navigation, zoom, long blocks, graph limits, and light/dark layouts. Unit tests additionally cover recursive scopes, delay slots, missing paths, indirect targets, and 64-bit addresses.
 
 `architectures.py` is the source of truth for both languages. After changing its metadata, run `python scripts/build_architectures.py`. Rebuild the offline demo with `python scripts/build_demo.py`. The Python tests run actual emulation for all 23 configurations, with separate processes to isolate native engine state.
