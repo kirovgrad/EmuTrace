@@ -1,8 +1,27 @@
+# Operating-system and editor files
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Python environments, caches, and build output
 .venv/
 __pycache__/
+*.py[cod]
 .pytest_cache/
-/trace_*.emtr
-/test-results/
-node_modules/
 .ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# JavaScript dependencies and logs
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+
+# Generated local output
+/test-results/
+/trace_*.emtr

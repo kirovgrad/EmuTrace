@@ -38,6 +38,49 @@ const root = path.resolve(__dirname, "..");
     );
     assert.equal(await page.locator("#disassembly-view").isVisible(), false);
     assert.equal(await page.locator(".cfg-block:not(.external)").count(), 3);
+    assert.equal(await page.locator(".cfg-block-footer").count(), 0);
+    assert.equal(
+      await page
+        .locator(".cfg-block-heading")
+        .first()
+        .evaluate((el) => el.offsetHeight),
+      23,
+    );
+    assert.deepEqual(
+      await page
+        .locator(
+          ".execution-panel > .panel-heading, .register-panel > .panel-heading, .stack-panel > .panel-heading",
+        )
+        .evaluateAll((nodes) => nodes.map((node) => node.offsetHeight)),
+      [35, 35, 35],
+    );
+    assert.equal(
+      await page.evaluate(
+        () => getComputedStyle(document.body).backgroundColor,
+      ),
+      "rgb(254, 248, 240)",
+    );
+    assert.equal(
+      await page
+        .locator(".panel")
+        .first()
+        .evaluate((el) => getComputedStyle(el).backgroundColor),
+      "rgb(246, 239, 231)",
+    );
+    assert.equal(
+      await page
+        .locator(".cfg-instruction b")
+        .first()
+        .evaluate((el) => getComputedStyle(el).color),
+      "rgb(23, 99, 170)",
+    );
+    assert.equal(
+      await page
+        .locator("#reg-table td:first-child")
+        .first()
+        .evaluate((el) => getComputedStyle(el).color),
+      "rgb(23, 99, 170)",
+    );
     assert.equal(
       await page.locator(".cfg-edge.taken").getAttribute("data-count"),
       "7",
@@ -200,6 +243,39 @@ const root = path.resolve(__dirname, "..");
     });
     checks++;
     await page.locator("#theme-toggle").click();
+    assert.equal(
+      await page.evaluate(
+        () => getComputedStyle(document.body).backgroundColor,
+      ),
+      "rgb(36, 37, 47)",
+    );
+    assert.equal(
+      await page
+        .locator(".panel")
+        .first()
+        .evaluate((el) => getComputedStyle(el).backgroundColor),
+      "rgb(29, 30, 39)",
+    );
+    assert.equal(
+      await page
+        .locator(".cfg-instruction b")
+        .first()
+        .evaluate((el) => getComputedStyle(el).color),
+      "rgb(195, 155, 255)",
+    );
+    assert.equal(
+      await page
+        .locator("#reg-table td:first-child")
+        .first()
+        .evaluate((el) => getComputedStyle(el).color),
+      "rgb(195, 155, 255)",
+    );
+    assert.equal(
+      await page
+        .locator("#reg-table tr.changed .register-value")
+        .evaluate((el) => getComputedStyle(el).backgroundColor),
+      "rgba(210, 210, 220, 0.12)",
+    );
     await page.screenshot({
       path: path.join(root, "test-results/cfg-dark.png"),
       fullPage: true,
@@ -224,6 +300,11 @@ const root = path.resolve(__dirname, "..");
       "long-block.emtr",
     );
     await page.getByRole("button", { name: "Show all", exact: true }).waitFor();
+    assert.ok(
+      await page
+        .getByRole("button", { name: "Show all", exact: true })
+        .evaluate((button) => Boolean(button.closest(".cfg-block-heading"))),
+    );
     assert.equal(await page.locator(".cfg-instruction").count(), 12);
     await page.locator("#pb-last").click();
     await page.waitForFunction(

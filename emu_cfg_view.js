@@ -142,7 +142,7 @@ function createCFGView({
         : 0;
       g.setNode(block.id, {
         width: block.external ? 280 : 400,
-        height: block.external ? 76 : 56 + 18 * (visible.items.length + skips),
+        height: block.external ? 76 : 25 + 18 * (visible.items.length + skips),
       });
     }
     for (const edge of graph.edges)
@@ -181,11 +181,8 @@ function createCFGView({
             `<button class="cfg-instruction" data-instruction="${escape(item.key)}" data-frame="${item.visits[0]}" title="${escape(`${Emtr.hex(item.frame.address, item.frame.archId)} ${item.frame.mnemonic || ".byte"} ${item.frame.operands}`)}"><span>${Emtr.hex(item.frame.address, item.frame.archId)}</span><span><b>${escape(item.frame.mnemonic || ".byte")}</b> ${escape(item.frame.mnemonic ? item.frame.operands : Emtr.opcodeHex(item.frame.opcode))}</span></button>`,
         )
         .join("");
-      const footer = block.flow
-        ? `${block.flow.kind === "conditional" ? "Conditional branch" : block.flow.kind === "call" ? "Function call" : block.flow.kind === "return" ? "Return" : block.flow.kind === "jump" ? "Jump" : "Execution stops"}${block.flow.delay ? " · includes delay slot" : ""}`
-        : "Basic block";
       markup.push(
-        `<section class="cfg-block" data-block="${block.id}" style="${position}" aria-label="Basic block at ${Emtr.hex(block.address, block.archId)}"><div class="cfg-block-heading"><strong>${Emtr.hex(block.address, block.archId)}</strong><span>${block.visits.length.toLocaleString()} ${block.visits.length === 1 ? "visit" : "visits"}</span></div>${visible.start ? `<div class="cfg-skipped">${visible.start} earlier instructions</div>` : ""}${instructions}${visible.end < block.instructions.length ? `<div class="cfg-skipped">${block.instructions.length - visible.end} more instructions</div>` : ""}<div class="cfg-block-footer"><span>${footer}</span>${block.instructions.length > 14 ? `<button class="cfg-expand" data-expand="${block.id}">${expanded.has(block.id) ? "Collapse" : "Show all"}</button>` : ""}</div></section>`,
+        `<section class="cfg-block" data-block="${block.id}" style="${position}" aria-label="Basic block at ${Emtr.hex(block.address, block.archId)}"><div class="cfg-block-heading"><strong>${Emtr.hex(block.address, block.archId)}</strong><span class="cfg-block-meta"><span>${block.visits.length.toLocaleString()} ${block.visits.length === 1 ? "visit" : "visits"}</span>${block.instructions.length > 14 ? `<button class="cfg-expand" data-expand="${block.id}">${expanded.has(block.id) ? "Collapse" : "Show all"}</button>` : ""}</span></div>${visible.start ? `<div class="cfg-skipped">${visible.start} earlier instructions</div>` : ""}${instructions}${visible.end < block.instructions.length ? `<div class="cfg-skipped">${block.instructions.length - visible.end} more instructions</div>` : ""}</section>`,
       );
     }
     el("cfg-blocks").innerHTML = markup.join("");

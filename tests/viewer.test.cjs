@@ -167,16 +167,20 @@ function syntheticTrace(count, stackSize = 0) {
     await go(4);
     assert.equal(
       await rax()
-        .locator("td")
-        .nth(1)
+        .locator(".register-value")
         .evaluate((el) => getComputedStyle(el).color),
       redRGB,
+    );
+    assert.equal(
+      await rax()
+        .locator(".register-value")
+        .evaluate((el) => getComputedStyle(el).backgroundColor),
+      "rgba(70, 70, 70, 0.09)",
     );
     await go(5);
     assert.notEqual(
       await rax()
-        .locator("td")
-        .nth(1)
+        .locator(".register-value")
         .evaluate((el) => getComputedStyle(el).color),
       redRGB,
     );
@@ -186,6 +190,12 @@ function syntheticTrace(count, stackSize = 0) {
         .first()
         .evaluate((el) => getComputedStyle(el).color),
       redRGB,
+    );
+    assert.equal(
+      await firstStackValue
+        .locator(".stack-value-content")
+        .evaluate((el) => getComputedStyle(el).backgroundColor),
+      "rgba(70, 70, 70, 0.09)",
     );
     await go(7); // A branch does not write stack memory; the previous stack highlight remains.
     assert.equal(

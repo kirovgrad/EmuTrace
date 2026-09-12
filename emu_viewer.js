@@ -52,7 +52,7 @@ function loadCapstone() {
         return;
       }
       const script = document.createElement("script");
-      script.src = "capstone.min.js";
+      script.src = "vendor/capstone.min.js";
       script.onload = () => {
         try {
           window.cs.version();
@@ -345,7 +345,7 @@ function renderRegisters() {
     entries
       .map(([name, value]) => {
         const role = name === spec.sp ? "SP" : name === spec.pc ? "PC" : "";
-        return `<tr class="${changes.has(name) ? "changed" : ""}"><td>${escapeHTML(name)}${role && role !== name ? `<span class="reg-role">${role}</span>` : ""}</td><td>${Emtr.hex(value, frame.archId)}</td><td>${changes.has(name) ? Emtr.hex(changes.get(name), frame.archId) : "—"}</td></tr>`;
+        return `<tr class="${changes.has(name) ? "changed" : ""}"><td>${escapeHTML(name)}${role && role !== name ? `<span class="reg-role">${role}</span>` : ""}</td><td><span class="register-value">${Emtr.hex(value, frame.archId)}</span></td><td>${changes.has(name) ? Emtr.hex(changes.get(name), frame.archId) : "—"}</td></tr>`;
       })
       .join("") ||
     '<tr><td colspan="3" class="panel-empty">No register changes in this frame.</td></tr>';
@@ -458,7 +458,7 @@ function renderStackRows() {
       value >= 32 && value < 127 ? String.fromCharCode(value) : ".",
     ).join("");
     rows.push(
-      `<tr data-stack-row="${offset}"><td>${Emtr.hex(frame.sp + BigInt(offset), frame.archId)}</td><td class="stack-value ${asValues && Array.from(chunk, (_, i) => state.highlights.stack.has(offset + i)).some(Boolean) ? "highlighted" : ""}">${bytes}</td><td>${escapeHTML(ascii)}</td></tr>`,
+      `<tr data-stack-row="${offset}"><td>${Emtr.hex(frame.sp + BigInt(offset), frame.archId)}</td><td class="stack-value ${asValues && Array.from(chunk, (_, i) => state.highlights.stack.has(offset + i)).some(Boolean) ? "highlighted" : ""}"><span class="stack-value-content">${bytes}</span></td><td>${escapeHTML(ascii)}</td></tr>`,
     );
   }
   if (end < count) rows.push(spacer((count - end) * rowHeight));

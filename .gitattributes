@@ -1,0 +1,8 @@
+# Keep generated and third-party code out of GitHub language statistics.
+demo_trace.js linguist-generated=true
+emu_architectures.js linguist-generated=true
+vendor/*.js linguist-vendored=true
+
+# Trace files and screenshots should never receive text conversions or diffs.
+*.emtr binary
+*.png binary

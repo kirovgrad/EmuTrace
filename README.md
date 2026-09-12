@@ -1,21 +1,27 @@
 # EmuTrace
 
+[![CI](https://github.com/kirovgrad/EmuTrace/actions/workflows/ci.yml/badge.svg)](https://github.com/kirovgrad/EmuTrace/actions/workflows/ci.yml)
+
 Inspect Unicorn execution locally, one instruction at a time. Record CPU registers and stack memory, then open a trace in the standalone browser viewer. No server, account, CDN, or upload is required.
 
 ![EmuTrace execution inspector](examples/EmuTraceUI.png)
 
-## Start here
+## Quick start
 
-Python 3.9+ is required for recording. Use a current Safari, Chrome, Edge, or Firefox for the viewer.
+The viewer needs no installation. Download or clone the repository, open `emu_viewer.html` in a current Safari, Chrome, Edge, or Firefox, and select **Explore an example**. You can also drop any `.emtr` file onto the page. Everything runs locally, including direct `file://` use.
+
+To record your own trace, install Python 3.9 or newer and the two runtime dependencies:
 
 ```bash
+git clone https://github.com/kirovgrad/EmuTrace.git
+cd EmuTrace
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python example_trace.py
+python3 example_trace.py
 ```
 
-Open **emu_viewer.html** and drop `trace_x86_64.emtr` onto it. **Explore an example** opens a real, bundled trace immediately, including when the viewer is opened through `file://`.
+This writes `trace_x86_64.emtr` in the current directory. Open it with the viewer's **Open trace** button or drag it onto the page.
 
 ## Record a trace
 
@@ -51,7 +57,7 @@ tracer.save("my_trace.emtr")
 
 ## Snapshot semantics
 
-A frame describes state **before** its instruction executes. Change events compare frame N with frame N−1, regardless of playback direction or the last row you clicked. Red highlights retain the latest event in each panel; the register Previous column shows the value before that event. They describe observations since the preceding hook, not guaranteed effects of one completed instruction: other emulator hooks can change state, and an instruction can subsequently fault. The final instruction’s resulting state is not included.
+A frame describes state **before** its instruction executes. Change events compare frame N with frame N−1, regardless of playback direction or the last row you clicked. Red text with a subtle gray background retains the latest event in each panel; the register Previous column shows the value before that event. These changes describe observations since the preceding hook, not guaranteed effects of one completed instruction: other emulator hooks can change state, and an instruction can subsequently fault. The final instruction’s resulting state is not included.
 
 The stack defaults to native-width hexadecimal values decoded using the target endianness, like a debugger stack view: x86-64 bytes `08 00 00 00 00 00 00 00` display as `0000000000000008`. The **Bytes** selector shows the original bytes in ascending address order; ASCII always follows address order. Partial values show `??` for uncaptured bytes.
 
@@ -63,18 +69,18 @@ The capture covers scalar integer and status registers up to 64 bits, not SIMD/F
 
 The registry covers all ten architecture families shared by [Unicorn](https://github.com/unicorn-engine/unicorn) and [Capstone 5](https://github.com/capstone-engine/capstone/tree/5.0.6), in 23 configurations. Numeric IDs 0–8 retain their original meanings.
 
-| Family | `ARCH` selectors |
-|---|---|
-| x86 | `X86_16`, `X86`, `X86_64` |
-| ARM | `ARM16` (Thumb), `ARM32`, `ARM16BE`, `ARM32BE`, `ARM_MCLASS` (Cortex-M) |
-| AArch64 | `ARM64`, `ARM64BE` |
-| MIPS | `MIPS`, `MIPSEL`, `MIPS64`, `MIPS64EL` |
-| PowerPC | `PPC`, `PPC64` (big endian) |
-| SPARC | `SPARC`, `SPARC64` (big endian) |
-| Motorola 68K | `M68K` (68000, big endian) |
-| RISC-V | `RISCV32`, `RISCV64` (including compressed instructions) |
-| IBM SystemZ | `S390X` |
-| Infineon TriCore | `TRICORE` (1.6.2 decoder) |
+| Family           | `ARCH` selectors                                                        |
+| ---------------- | ----------------------------------------------------------------------- |
+| x86              | `X86_16`, `X86`, `X86_64`                                               |
+| ARM              | `ARM16` (Thumb), `ARM32`, `ARM16BE`, `ARM32BE`, `ARM_MCLASS` (Cortex-M) |
+| AArch64          | `ARM64`, `ARM64BE`                                                      |
+| MIPS             | `MIPS`, `MIPSEL`, `MIPS64`, `MIPS64EL`                                  |
+| PowerPC          | `PPC`, `PPC64` (big endian)                                             |
+| SPARC            | `SPARC`, `SPARC64` (big endian)                                         |
+| Motorola 68K     | `M68K` (68000, big endian)                                              |
+| RISC-V           | `RISCV32`, `RISCV64` (including compressed instructions)                |
+| IBM SystemZ      | `S390X`                                                                 |
+| Infineon TriCore | `TRICORE` (1.6.2 decoder)                                               |
 
 These are baseline ISA modes. CPU-specific extensions such as microMIPS, ARM BE8, or other M68K/TriCore decoder generations are not selectable. AArch64 big-endian data still uses little-endian instruction encoding. The user's Unicorn engine controls emulation and CPU selection; the tracer never changes its CPU model.
 
@@ -100,14 +106,14 @@ The examples account for SPARC64’s 8 KiB and TriCore’s 16 KiB mapping alignm
 - Full 64-bit integer precision, including addresses, register comparisons, and exported hex strings.
 - Bounded decompression, strict field validation, empty-file handling, and retention of the current trace if opening a replacement fails.
 
-| Shortcut | Action |
-|---|---|
-| `→` / `n`, `←` / `p` | Next / previous frame |
-| `Space` | Play / pause |
-| `Home`, `End` | First / last frame |
-| `b` / `F2`, double-click a disassembly row | Toggle breakpoint |
-| `/` | Focus search |
-| `Enter`, `Shift+Enter` in search | Next / previous match |
+| Shortcut                                   | Action                |
+| ------------------------------------------ | --------------------- |
+| `→` / `n`, `←` / `p`                       | Next / previous frame |
+| `Space`                                    | Play / pause          |
+| `Home`, `End`                              | First / last frame    |
+| `b` / `F2`, double-click a disassembly row | Toggle breakpoint     |
+| `/`                                        | Focus search          |
+| `Enter`, `Shift+Enter` in search           | Next / previous match |
 
 Shortcuts do not interfere with text fields, buttons, selects, or the help dialog. The UI uses **one-based** frame numbers; Python frame lists remain zero-based.
 
@@ -131,12 +137,12 @@ To keep layout bounded, a graph supports up to 5,000 distinct instructions, 300 
 
 All wire integers are little endian, regardless of the emulated architecture. Both versions begin with a 16-byte uncompressed header:
 
-| Field | Type |
-|---|---|
-| Magic `EMTR` | 4 bytes |
-| Version (1 or 2) | uint32 |
-| Architecture ID | uint32 |
-| Frame count | uint32 |
+| Field            | Type    |
+| ---------------- | ------- |
+| Magic `EMTR`     | 4 bytes |
+| Version (1 or 2) | uint32  |
+| Architecture ID  | uint32  |
+| Frame count      | uint32  |
 
 The remainder is one zlib stream. V2 starts with a uint32 flags word (bit 0: capture limit reached; other bits reserved). V1 has no flags word. Each frame contains:
 
@@ -160,7 +166,7 @@ mnemonic           UTF-8[mnemonic_length]
 operands           UTF-8[operands_length]
 ```
 
-V2 embeds Python Capstone disassembly and the per-instruction architecture. The viewer reads existing v1 files using the bundled legacy `capstone.min.js`. That older decoder does not contain the newer architectures and its address binding is limited to 32 bits; unsupported instructions or higher addresses are explicitly shown as raw bytes. Newly recorded v2 traces avoid these limitations. A failed decode never invents an instruction.
+V2 embeds Python Capstone disassembly and the per-instruction architecture. The viewer reads existing v1 files using the bundled legacy `vendor/capstone.min.js`. That older decoder does not contain the newer architectures and its address binding is limited to 32 bits; unsupported instructions or higher addresses are explicitly shown as raw bytes. Newly recorded v2 traces avoid these limitations. A failed decode never invents an instruction.
 
 `tracer.save(path, version=1)` exports the original structure for older viewers, omitting v2 disassembly, mode metadata, and the truncation flag. Old viewers only recognize the original architecture IDs. Neither version is a substitute for emulator state serialization.
 
@@ -173,20 +179,3 @@ print(reader.frames[0]["regs"])
 ```
 
 `python emu_tracer.py dump my_trace.emtr` exports JSON. Addresses and register values use hexadecimal strings to remain exact in JavaScript consumers.
-
-## Development and validation
-
-The viewer has no build step or npm installation requirement. Node 20+ and pnpm are only needed for development. CFG layout uses the bundled MIT-licensed [Dagre](vendor/README.md); `pnpm run vendor:cfg` refreshes the unmodified bundle and license notices from locked development dependencies. Run `ruff check .` and `ruff format --check .` for Python, or `pnpm run format:check` for browser code.
-
-```bash
-pip install -r requirements-dev.txt
-python -m pytest -q
-pnpm install --frozen-lockfile
-pnpm test
-pnpm exec playwright install chromium
-pnpm run test:ui
-```
-
-To use an installed Chrome binary instead, set `EMUTRACE_BROWSER` to its executable path. The browser suites write ignored screenshots under `test-results/` and test direct `file://` loading, zero external requests, legacy decoding, navigation, state comparison, breakpoints, playback, exports, concurrent loads, empty/corrupt files, a 30,000-frame trace, and mobile layout. CFG checks cover tab/state synchronization, conditional edges, call/return navigation, zoom, long blocks, graph limits, and light/dark layouts. Unit tests additionally cover recursive scopes, delay slots, missing paths, indirect targets, and 64-bit addresses.
-
-`architectures.py` is the source of truth for both languages. After changing its metadata, run `python scripts/build_architectures.py`. Rebuild the offline demo with `python scripts/build_demo.py`. The Python tests run actual emulation for all 23 configurations, with separate processes to isolate native engine state.
