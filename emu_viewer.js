@@ -1,616 +1,787 @@
-const MAGIC   = 0x52544D45;   // "EMTR" LE
-const VERSION = 1;
-
-const ARCH_NAMES = {
-  0: "ARM16 (Thumb)", 1: "ARM32", 2: "ARM64",
-  3: "x86",           4: "x86-64",
-  5: "MIPS (BE)",     6: "MIPS (LE)",
-  7: "MIPS64 (BE)",   8: "MIPS64 (LE)",
+"use strict";
+const $ = (id) => document.getElementById(id);
+const escapeHTML = (value) =>
+  String(value).replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
+  );
+const state = {
+  trace: null,
+  index: 0,
+  breakpoints: new Set(),
+  onlyBreakpoints: false,
+  visible: [],
+  matches: [],
+  query: "",
+  timer: null,
+  loadId: 0,
+  hits: new Map(),
 };
+// The CSS metrics are also used by both virtualized tables.
+const tableStyle = getComputedStyle(document.documentElement);
+const ROW_HEIGHT = parseFloat(tableStyle.getPropertyValue("--data-row-height"));
+const HEADER_HEIGHT = parseFloat(
+  tableStyle.getPropertyValue("--table-header-height"),
+);
+let capstonePromise;
+let searchTimer;
+let scrollRequest;
 
-// SP register names per arch
-const SP_NAMES = {
-  0:"SP", 1:"SP", 2:"SP",
-  3:"ESP", 4:"RSP",
-  5:"sp",  6:"sp", 7:"sp", 8:"sp",
-};
-// PC/IP register names per arch
-const PC_NAMES = {
-  0:"PC", 1:"PC", 2:"PC",
-  3:"EIP", 4:"RIP",
-  5:"PC", 6:"PC", 7:"PC", 8:"PC",
-};
-// FLAGS register name per arch
-const FLAGS_NAMES = {
-  3:"EFLAGS", 4:"EFLAGS",
-};
-
-// x86 EFLAGS bit definitions
-const EFLAGS_BITS = [
-  {bit:0, name:"CF"}, {bit:2, name:"PF"}, {bit:4, name:"AF"},
-  {bit:6, name:"ZF"}, {bit:7, name:"SF"}, {bit:8, name:"TF"},
-  {bit:9, name:"IF"}, {bit:10,name:"DF"}, {bit:11,name:"OF"},
-];
-
-// ── inflate via DecompressionStream (modern browsers) ─────────────────────
-async function inflate(compressed) {
-  const ds = new DecompressionStream("deflate");
-  const writer = ds.writable.getWriter();
-  writer.write(compressed);
-  writer.close();
-  const chunks = [];
-  const reader = ds.readable.getReader();
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-  let total = chunks.reduce((s, c) => s + c.length, 0);
-  const out = new Uint8Array(total);
-  let pos = 0;
-  for (const c of chunks) { out.set(c, pos); pos += c.length; }
-  return out;
+function status(message, error = false) {
+  $("status-msg").textContent = message;
+  $("status-msg").classList.toggle("error", error);
 }
-
-async function parseEmtr(buffer) {
-  const dv = new DataView(buffer);
-  const magic = dv.getUint32(0, true);
-  if (magic !== MAGIC) throw new Error("Bad magic – not a .emtr file");
-  const version = dv.getUint32(4, true);
-  if (version !== VERSION) throw new Error("Unsupported version " + version);
-  const archId  = dv.getUint32(8,  true);
-  const nFrames = dv.getUint32(12, true);
-
-  // decompress the rest
-  const compressed = new Uint8Array(buffer, 16);
-  const payload = await inflate(compressed);
-
-  // parse frames
-  const frames = [];
-  let off = 0;
-  const pdv = new DataView(payload.buffer);
-
-  function readU8()  { return payload[off++]; }
-  function readU16() { const v = pdv.getUint16(off, true); off += 2; return v; }
-  function readU32() { const v = pdv.getUint32(off, true); off += 4; return v; }
-  function readU64() {
-    const lo = pdv.getUint32(off, true);
-    const hi = pdv.getUint32(off+4, true);
-    off += 8;
-    return hi * 0x100000000 + lo;
-  }
-  function readBytes(n) { const b = payload.slice(off, off+n); off += n; return b; }
-  function readStr(n)   { return new TextDecoder().decode(readBytes(n)); }
-
-  for (let i = 0; i < nFrames; i++) {
-    const address   = readU64();
-    const opcodeLen = readU16();
-    const opcode    = readBytes(opcodeLen);
-
-    const nRegs = readU16();
-    const regs = {};
-    for (let r = 0; r < nRegs; r++) {
-      const nameLen = readU8();
-      const name    = readStr(nameLen);
-      const val     = readU64();
-      regs[name] = val;
-    }
-
-    const sp      = readU64();
-    const nStack  = readU32();
-    const stack   = readBytes(nStack);
-
-    frames.push({ address, opcode, regs, sp, stack });
-  }
-
-  return { archId, archName: ARCH_NAMES[archId] || "Unknown", nFrames, frames };
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Disassembly  – using Capstone.js (wasm) if available, else hex-only
-// ════════════════════════════════════════════════════════════════════════════
-
-// Capstone architecture / mode per arch id
-const CS_ARCH_MODE = {
-  0: [0, 1 << 4],             // ARM16
-  1: [0, 0],                  // ARM32
-  2: [1, 0],                  // ARM64
-  3: [3, 1 << 2],             // X86 
-  4: [3, 1 << 3],             // X86_64
-  5: [2, (1 << 2)|(1 << 31)], // MIPS
-  6: [2, 1 << 2],             // MIPSEL
-  7: [2, (1 << 3)|(1 << 31)], // MIPS64
-  8: [2, 1 << 3],             // MIPS64EL
-};
-
-// Resolves to true once window.cs is fully initialised, false on failure.
-// Capstone.js is an Emscripten module: the script tag fires onload as soon
-// as the JS is parsed, but window.cs (the module object) is only populated
-// after the asm.js / WASM runtime finishes its async init.  We must wait for
-// the module's onRuntimeInitialized callback before using it.
-function loadCapstone() {
-  return new Promise((resolve) => {
-
-    // Already initialised from a previous call – nothing to do.
-    if (window.cs && window.cs.Capstone) { resolve(true); return; }
-
-    // Module exists but hasn't finished init yet – hook the callback.
-    if (window.cs && !window.cs.Capstone) {
-      const orig = window.cs.onRuntimeInitialized;
-      window.cs.onRuntimeInitialized = function() {
-        if (orig) orig.call(this);
-        resolve(!!window.cs.Capstone);
-      };
-      return;
-    }
-
-    // Script not injected yet – inject it, then wait for runtime init.
-    // Emscripten checks for a pre-existing Module object; if we put our
-    // callback there before the script runs, it will be called automatically.
-    window.Module = window.Module || {};
-    window.Module.onRuntimeInitialized = function() {
-      // capstone.js copies itself onto window.cs after init
-      resolve(!!(window.cs && window.cs.Capstone));
-    };
-
-    const s = document.createElement('script');
-    s.src = './capstone.min.js';
-    s.onerror = () => resolve(false);
-    // Do NOT resolve in onload – the runtime init fires after onload.
-    // onerror is the only synchronous failure path.
-    document.head.appendChild(s);
-
-    // Safety timeout: if the module never calls onRuntimeInitialized
-    // (e.g. very old build that uses a different pattern), give up after 5 s.
-    setTimeout(() => resolve(!!(window.cs && window.cs.Capstone)), 300);
+function setEnabled(enabled) {
+  document.querySelectorAll("[data-trace]").forEach((element) => {
+    element.disabled = !enabled;
   });
 }
+setEnabled(false);
 
-async function disassemble(archId, address, opcodeBytes) {
-  if (window.cs && window.cs.Capstone) {
-    try {
-      const [arch, mode] = CS_ARCH_MODE[archId] || [3, 1 << 3];
-      const ud = new cs.Capstone(arch, mode);
-      // disasm() expects a plain Array of integers (byte values), and a
-      // numeric address.  Do NOT convert bytes to hex strings here.
-      const insns = ud.disasm(Array.from(opcodeBytes), address);
-      ud.close();
-      if (insns && insns.length > 0) {
-        return { mnem: insns[0].mnemonic, ops: insns[0].op_str };
+// The bundled asm.js runtime initializes itself. Probe its actual API after
+// script.onload instead of guessing with a short timeout or replacing Module.
+function loadCapstone() {
+  if (!capstonePromise)
+    capstonePromise = new Promise((resolve) => {
+      if (window.cs?.Capstone) {
+        resolve(window.cs);
+        return;
       }
-    } catch (e) { console.log(e); }
-  }
-  // Fallback when Capstone is unavailable or fails
-  return {
-    mnem: "db",
-    ops: Array.from(opcodeBytes)
-           .map(b => `0x${b.toString(16).padStart(2, '0')}`)
-           .join(', '),
-  };
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  State
-// ════════════════════════════════════════════════════════════════════════════
-let trace     = null;   // parsed trace object
-let curFrame  = 0;      // currently selected frame index
-let disasmCache = [];   // { address, opcodeHex, mnem, ops } per frame
-let breakpoints = new Set();
-let searchResults = [];
-let searchIdx = 0;
-let playInterval = null;
-let prevRegs = null;
-
-// ════════════════════════════════════════════════════════════════════════════
-//  UI helpers
-// ════════════════════════════════════════════════════════════════════════════
-
-function hexByte(b) { return b.toString(16).padStart(2,'0'); }
-function hexWord(v, w=8) {
-  if (v > Number.MAX_SAFE_INTEGER) {
-    // BigInt path not needed here since we already split to JS number
-    return v.toString(16).padStart(w,'0');
-  }
-  return v.toString(16).padStart(w,'0');
-}
-
-function formatAddr(v, archId) {
-  const w = (archId === 2 || archId === 4 || archId === 7 || archId === 8) ? 16 : 8;
-  return '0x' + hexWord(v, w);
-}
-
-function formatOpcodeColored(bytes) {
-  const colors = ['ob0','ob1','ob2','ob3','ob4','ob5'];
-  return Array.from(bytes)
-    .map((b,i) => `<span class="${colors[i % colors.length]}">${hexByte(b)}</span>`)
-    .join(' ');
-}
-
-function setStatus(msg, cls='') {
-  const el = document.getElementById('status-msg');
-  el.textContent = msg;
-  el.className = cls;
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Load & initialise
-// ════════════════════════════════════════════════════════════════════════════
-
-async function loadTrace(buffer) {
-  setStatus("Parsing …");
-  try {
-    trace = await parseEmtr(buffer);
-  } catch(e) {
-    setStatus("❌ " + e.message, 'status-err');
-    return;
-  }
-
-  // Try to load capstone
-  const ok = await loadCapstone();
-  setStatus(ok ? "Capstone loaded – disassembling …" : "Capstone unavailable – raw bytes mode");
-
-  // Pre-disassemble all frames
-  disasmCache = [];
-  for (const f of trace.frames) {
-    const d = await disassemble(trace.archId, f.address, f.opcode);
-    const opcHex = Array.from(f.opcode).map(hexByte).join(' ');
-    disasmCache.push({ address: f.address, opcodeHex: opcHex, ...d });
-  }
-
-  // Populate disassembly table (all rows, virtual)
-  buildDisasmTable();
-
-  // Update UI chrome
-  document.getElementById('arch-badge').textContent = trace.archName;
-  document.getElementById('frame-counter').textContent = `${trace.nFrames} frames`;
-  document.getElementById('disasm-badge').textContent = `${trace.nFrames} insns`;
-
-  const slider = document.getElementById('frame-slider');
-  slider.max   = trace.nFrames - 1;
-  slider.value = 0;
-
-  document.getElementById('drop-overlay').classList.add('hidden');
-  prevRegs = null;
-  selectFrame(0);
-  setStatus(`Loaded ${trace.nFrames.toLocaleString()} frames · ${ARCH_NAMES[trace.archId]}`, 'status-ok');
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Disassembly table
-// ════════════════════════════════════════════════════════════════════════════
-
-function buildDisasmTable() {
-  const tbody = document.getElementById('disasm-body');
-  const frag  = document.createDocumentFragment();
-  for (let i = 0; i < disasmCache.length; i++) {
-    const d = disasmCache[i];
-    const tr = document.createElement('tr');
-    tr.className = 'disasm-row';
-    tr.dataset.idx = i;
-    tr.innerHTML = `
-      <td class="row-idx">${i}</td>
-      <td class="row-addr">${formatAddr(d.address, trace.archId)}</td>
-      <td class="row-opcode">${formatOpcodeColored(trace.frames[i].opcode)}</td>
-      <td class="row-mnem">${escHtml(d.mnem)}</td>
-      <td class="row-ops">${escHtml(d.ops)}</td>
-    `;
-    tr.addEventListener('click', () => {
-      selectFrame(i);
+      const script = document.createElement("script");
+      script.src = "capstone.min.js";
+      script.onload = () => {
+        try {
+          window.cs.version();
+          resolve(window.cs);
+        } catch {
+          resolve(null);
+        }
+      };
+      script.onerror = () => resolve(null);
+      document.head.appendChild(script);
     });
-    tr.addEventListener('dblclick', () => toggleBreakpoint(i));
-    frag.appendChild(tr);
-  }
-  tbody.innerHTML = '';
-  tbody.appendChild(frag);
+  return capstonePromise;
 }
 
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;');
-}
-
-function highlightRow(idx) {
-  const tbody = document.getElementById('disasm-body');
-  // remove old
-  const prev = tbody.querySelector('.selected');
-  if (prev) prev.classList.remove('selected');
-  const row = tbody.querySelector(`tr[data-idx="${idx}"]`);
-  if (!row) return;
-  row.classList.add('selected');
-  // scroll into view
-  row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-}
-
-function toggleBreakpoint(idx) {
-  if (breakpoints.has(idx)) {
-    breakpoints.delete(idx);
-  } else {
-    breakpoints.add(idx);
-  }
-  const row = document.getElementById('disasm-body').querySelector(`tr[data-idx="${idx}"]`);
-  if (row) row.classList.toggle('breakpoint', breakpoints.has(idx));
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Frame selection
-// ════════════════════════════════════════════════════════════════════════════
-
-function selectFrame(idx) {
-  if (!trace || idx < 0 || idx >= trace.nFrames) return;
-  const oldFrame = curFrame;
-  curFrame = idx;
-
-  const frame = trace.frames[idx];
-  const d     = disasmCache[idx];
-
-  // slider
-  document.getElementById('frame-slider').value = idx;
-  document.getElementById('slider-label').textContent = `${idx} / ${trace.nFrames - 1}`;
-
-  // status
-  document.getElementById('status-addr').textContent = formatAddr(frame.address, trace.archId);
-  document.getElementById('status-opcode').textContent = d.mnem + ' ' + d.ops;
-
-  // highlight row
-  highlightRow(idx);
-
-  // registers
-  updateRegs(frame, prevRegs);
-  prevRegs = { ...frame.regs };
-
-  // stack
-  updateStack(frame);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Register panel
-// ════════════════════════════════════════════════════════════════════════════
-
-function buildRegRow(name, val, prev, spName, pcName, flgName, archId) {
-  const changed = prev && prev[name] !== val;
-  const addrStr = formatAddr(val, archId);
-  let cls = 'reg-val';
-  if (name === spName)  cls += ' reg-sp';
-  if (name === pcName)  cls += ' reg-pc';
-  if (name === flgName) cls += ' reg-flags';
-  if (changed)          cls += ' changed';
-
-  const diff = (changed && prev)
-    ? ` <span style="font-size:10px;color:var(--text-dim)">← ${formatAddr(prev[name], archId)}</span>`
-    : '';
-
-  return `<tr>
-    <td class="reg-name">${escHtml(name)}</td>
-    <td class="${cls}">${addrStr}${diff}</td>
-  </tr>`;
-}
-
-function updateRegs(frame, prev) {
-  const leftTbody  = document.getElementById('reg-body-left');
-  const rightTbody = document.getElementById('reg-body-right');
-  const flagsDiv   = document.getElementById('flags-area');
-  const spName     = SP_NAMES[trace.archId]  || 'SP';
-  const pcName     = PC_NAMES[trace.archId]  || 'PC';
-  const flgName    = FLAGS_NAMES[trace.archId];
-  const archId     = trace.archId;
-
-  const entries = Object.entries(frame.regs);
-  const leftRows = [];
-  const rightRows = [];
-
-  if (entries.length > 22) {
-    const mid = Math.ceil(entries.length / 2);
-    for (let i = 0; i < mid; i++) {
-      leftRows.push(buildRegRow(entries[i][0], entries[i][1], prev, spName, pcName, flgName, archId));
+async function decodeLegacy(trace, loadId) {
+  if (trace.frames.every((frame) => frame.mnemonic)) return;
+  const cs = await loadCapstone();
+  const engines = new Map(),
+    cache = new Map();
+  try {
+    for (let index = 0; index < trace.frames.length; index++) {
+      if (state.loadId !== loadId) return;
+      const frame = trace.frames[index];
+      if (!frame.mnemonic) {
+        const key = `${frame.archId}:${frame.address}:${Emtr.opcodeHex(frame.opcode)}`;
+        let decoded = cache.get(key);
+        if (!decoded) {
+          decoded = { mnemonic: "", operands: "" };
+          // This older JS binding passes a zero high word for the instruction
+          // address. Refuse to produce incorrect branch targets above 32 bits.
+          if (cs && frame.address <= 0xffffffffn) {
+            if (!engines.has(frame.archId)) {
+              const spec = Emtr.architectures[frame.archId];
+              const arch = cs["ARCH_" + spec.csArch];
+              const modes = spec.csModes.map((name) => cs["MODE_" + name]);
+              let engine = null;
+              try {
+                if (
+                  arch !== undefined &&
+                  modes.every((mode) => mode !== undefined)
+                )
+                  engine = new cs.Capstone(
+                    arch,
+                    modes.reduce((mode, bit) => mode | bit, 0),
+                  );
+              } catch {
+                /* Not compiled into the legacy browser library. */
+              }
+              engines.set(frame.archId, engine);
+            }
+            try {
+              const instruction = engines
+                .get(frame.archId)
+                ?.disasm(Array.from(frame.opcode), Number(frame.address), 1)[0];
+              if (instruction)
+                decoded = {
+                  mnemonic: instruction.mnemonic,
+                  operands: instruction.op_str,
+                };
+            } catch {
+              /* Raw bytes are retained for unsupported instructions. */
+            }
+          }
+          cache.set(key, decoded);
+        }
+        Object.assign(frame, decoded);
+      }
+      if (index % 500 === 0) {
+        status(
+          `Decoding instructions… ${Math.round((index / trace.nFrames) * 100)}%`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
     }
-    for (let i = mid; i < entries.length; i++) {
-      rightRows.push(buildRegRow(entries[i][0], entries[i][1], prev, spName, pcName, flgName, archId));
-    }
-  } else {
-    for (const [name, val] of entries) {
-      leftRows.push(buildRegRow(name, val, prev, spName, pcName, flgName, archId));
-    }
-  }
-
-  leftTbody.innerHTML = leftRows.join('');
-  rightTbody.innerHTML = rightRows.join('');
-
-  // Flags
-  if (flgName && frame.regs[flgName] !== undefined) {
-    const f = frame.regs[flgName];
-    flagsDiv.innerHTML = EFLAGS_BITS.map(fb => {
-      const on = (f >> fb.bit) & 1;
-      return `<span class="flag-bit ${on?'on':''}">${fb.name}</span>`;
-    }).join('');
-  } else {
-    flagsDiv.innerHTML = '';
+  } finally {
+    for (const engine of engines.values()) if (engine) engine.close();
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  Stack panel
-// ════════════════════════════════════════════════════════════════════════════
-
-function updateStack(frame) {
-  const tbody  = document.getElementById('stack-body');
-  const badge  = document.getElementById('stack-badge');
-  const archId = trace.archId;
-  const sp     = frame.sp;
-  const data   = frame.stack;
-
-  badge.textContent = 'SP: ' + formatAddr(sp, archId);
-
-  const wordSize = (archId === 2 || archId === 4 || archId === 7 || archId === 8) ? 8 : 4;
-  const rowBytes = wordSize * 2;   // show 2 words per row for readability
-  const rows = [];
-
-  for (let off = 0; off < data.length; off += rowBytes) {
-    const addr   = sp + off;
-    const chunk  = data.slice(off, off + rowBytes);
-    const hexStr = Array.from(chunk).map(hexByte).join(' ');
-    const ascii  = Array.from(chunk).map(b =>
-      (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '.'
-    ).join('');
-    const isSP = off === 0;
-    rows.push(`<tr class="${isSP ? 'stk-sp-row' : ''}">
-      <td class="stk-addr">${formatAddr(addr, archId)}</td>
-      <td class="stk-hex">${escHtml(hexStr)}</td>
-      <td class="stk-ascii">${escHtml(ascii)}</td>
-    </tr>`);
-  }
-  tbody.innerHTML = rows.join('');
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Playback controls
-// ════════════════════════════════════════════════════════════════════════════
-
-function stepNext() {
-  if (!trace) return;
-  if (curFrame + 1 < trace.nFrames) {
-    selectFrame(curFrame + 1);
-    // stop at breakpoint
-    if (breakpoints.has(curFrame) && playInterval) togglePlay();
-  } else {
-    if (playInterval) togglePlay();
-  }
-}
-function stepPrev()  { if (trace) selectFrame(curFrame - 1); }
-function gotoFirst() { if (trace) selectFrame(0); }
-function gotoLast()  { if (trace) selectFrame(trace.nFrames - 1); }
-
-function togglePlay() {
-  const btn = document.getElementById('pb-play');
-  if (playInterval) {
-    clearInterval(playInterval);
-    playInterval = null;
-    btn.textContent = '▶';
-    btn.classList.remove('active');
-  } else {
-    btn.textContent = '⏸';
-    btn.classList.add('active');
-    playInterval = setInterval(stepNext, 80);
-  }
-}
-
-document.getElementById('pb-first').onclick = gotoFirst;
-document.getElementById('pb-prev').onclick  = stepPrev;
-document.getElementById('pb-play').onclick  = togglePlay;
-document.getElementById('pb-next').onclick  = stepNext;
-document.getElementById('pb-last').onclick  = gotoLast;
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Keyboard
-// ════════════════════════════════════════════════════════════════════════════
-
-document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT') return;
-  if (e.key === 'ArrowRight' || e.key === 'n') { stepNext(); e.preventDefault(); }
-  if (e.key === 'ArrowLeft'  || e.key === 'p') { stepPrev(); e.preventDefault(); }
-  if (e.key === ' ') { togglePlay(); e.preventDefault(); }
-  if (e.key === 'Home') { gotoFirst(); e.preventDefault(); }
-  if (e.key === 'End')  { gotoLast();  e.preventDefault(); }
-  if (e.key === 'b' || e.key === 'F2') { toggleBreakpoint(curFrame); e.preventDefault(); }
-});
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Slider
-// ════════════════════════════════════════════════════════════════════════════
-
-document.getElementById('frame-slider').addEventListener('input', function() {
-  selectFrame(parseInt(this.value));
-});
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Search
-// ════════════════════════════════════════════════════════════════════════════
-
-function runSearch(query) {
-  if (!trace || !query.trim()) {
-    searchResults = [];
-    document.getElementById('search-info').textContent = '';
-    return;
-  }
-  const q = query.toLowerCase().trim();
-  searchResults = [];
-  for (let i = 0; i < disasmCache.length; i++) {
-    const d = disasmCache[i];
-    if (
-      formatAddr(d.address, trace.archId).includes(q) ||
-      d.mnem.toLowerCase().includes(q) ||
-      d.ops.toLowerCase().includes(q) ||
-      d.opcodeHex.includes(q)
-    ) {
-      searchResults.push(i);
-    }
-  }
-  searchIdx = 0;
-  updateSearchInfo();
-  if (searchResults.length) selectFrame(searchResults[0]);
-}
-
-function updateSearchInfo() {
-  const el = document.getElementById('search-info');
-  if (!searchResults.length) {
-    el.textContent = 'No matches';
-    el.style.color = 'var(--red)';
-  } else {
-    el.textContent = `${searchIdx + 1} / ${searchResults.length}`;
-    el.style.color = 'var(--green)';
+async function loadBuffer(buffer, name, loadId = ++state.loadId) {
+  stopPlayback();
+  status("Reading trace…");
+  try {
+    const trace = await Emtr.parse(buffer);
+    if (loadId !== state.loadId) return;
+    status("Preparing execution view…");
+    await decodeLegacy(trace, loadId);
+    if (loadId !== state.loadId) return;
+    const hits = new Map();
+    for (const frame of trace.frames)
+      hits.set(frame.address, (hits.get(frame.address) || 0) + 1);
+    Object.assign(state, {
+      trace,
+      index: 0,
+      breakpoints: new Set(),
+      onlyBreakpoints: false,
+      visible: [],
+      matches: [],
+      query: "",
+      hits,
+      changeHistory: Emtr.createChangeHistory(trace.frames),
+    });
+    clearTimeout(searchTimer);
+    $("search-input").value = "";
+    $("search-info").textContent = "";
+    $("changed-only").checked = false;
+    $("trace-name").textContent = name;
+    $("arch-name").textContent = trace.archName;
+    $("trace-count").textContent =
+      `${trace.nFrames.toLocaleString()} frames${trace.truncated ? " · capture limit reached" : ""}`;
+    $("trace-unique").textContent =
+      `${hits.size.toLocaleString()} unique addresses`;
+    $("trace-size").textContent =
+      buffer.byteLength < 1024
+        ? `${buffer.byteLength} B`
+        : `${(buffer.byteLength / 1024).toFixed(1)} KB`;
+    $("frame-total").textContent = `/ ${trace.nFrames.toLocaleString()}`;
+    $("frame-input").max = Math.max(1, trace.nFrames);
+    $("frame-slider").max = Math.max(0, trace.nFrames - 1);
+    $("watch-register").replaceChildren(new Option("Choose…", ""));
+    const names = new Set();
+    for (const frame of trace.frames)
+      for (const name of Object.keys(frame.regs)) names.add(name);
+    for (const register of names)
+      $("watch-register").add(new Option(register, register));
+    $("welcome").hidden = true;
+    $("workspace").hidden = false;
+    $("disasm-table").classList.toggle(
+      "wide",
+      Emtr.architectures[trace.archId].bits === 64,
+    );
+    $("disasm-scroll").scrollTop = 0;
+    $("reg-scroll").scrollTop = 0;
+    $("stack-scroll").scrollTop = 0;
+    setEnabled(trace.nFrames > 0);
+    rebuildVisible();
+    if (trace.nFrames) selectFrame(0);
+    else clearPanels();
+    const rawCount = trace.frames.filter((frame) => !frame.mnemonic).length;
+    status(
+      trace.truncated
+        ? "Capture stopped at the configured limit. This is a partial trace."
+        : trace.nFrames
+          ? rawCount
+            ? `Loaded ${trace.nFrames.toLocaleString()} frames · ${rawCount.toLocaleString()} instructions shown as raw bytes (decoder unavailable).`
+            : `Loaded ${trace.nFrames.toLocaleString()} frames. All processing stays on this device.`
+          : "This trace contains no frames.",
+    );
+  } catch (error) {
+    if (loadId === state.loadId)
+      status(`Could not open trace: ${error.message}`, true);
   }
 }
-
-document.getElementById('search-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') {
-    if (!searchResults.length) {
-      runSearch(e.target.value);
-    } else {
-      searchIdx = (searchIdx + (e.shiftKey ? -1 : 1) + searchResults.length) % searchResults.length;
-      updateSearchInfo();
-      selectFrame(searchResults[searchIdx]);
-    }
-    e.preventDefault();
-  }
-});
-document.getElementById('search-input').addEventListener('input', e => {
-  runSearch(e.target.value);
-});
-
-// ════════════════════════════════════════════════════════════════════════════
-//  File loading
-// ════════════════════════════════════════════════════════════════════════════
 
 async function handleFile(file) {
   if (!file) return;
-  const buf = await file.arrayBuffer();
-  await loadTrace(buf);
+  const loadId = ++state.loadId;
+  stopPlayback();
+  if (file.size > Emtr.MAX_BYTES + 16) {
+    status("File exceeds the 256 MiB size limit.", true);
+    return;
+  }
+  status(`Opening ${file.name}…`);
+  try {
+    const buffer = await file.arrayBuffer();
+    if (state.loadId === loadId) await loadBuffer(buffer, file.name, loadId);
+  } catch (error) {
+    if (loadId === state.loadId)
+      status(`Could not read file: ${error.message}`, true);
+  }
 }
 
-document.getElementById('file-input').addEventListener('change', e => {
-  handleFile(e.target.files[0]);
-});
+function rebuildVisible() {
+  state.visible = state.onlyBreakpoints
+    ? Array.from(state.breakpoints).sort((a, b) => a - b)
+    : Array.from({ length: state.trace.nFrames }, (_, i) => i);
+  $("show-all").classList.toggle("active", !state.onlyBreakpoints);
+  $("show-breakpoints").classList.toggle("active", state.onlyBreakpoints);
+  $("show-all").setAttribute("aria-pressed", String(!state.onlyBreakpoints));
+  $("show-breakpoints").setAttribute(
+    "aria-pressed",
+    String(state.onlyBreakpoints),
+  );
+  $("breakpoint-count").textContent = state.breakpoints.size;
+  $("empty-list").hidden = state.visible.length > 0;
+  $("empty-list").textContent = state.onlyBreakpoints
+    ? "No breakpoints. Press B to set one on the selected frame."
+    : "No instruction frames in this trace.";
+  renderInstructions();
+}
 
-// Drag & drop
-const overlay = document.getElementById('drop-overlay');
-const dropBox = document.getElementById('drop-box');
+function renderInstructions() {
+  if (!state.trace) return;
+  const scroll = $("disasm-scroll");
+  const start = Math.min(
+    Math.max(0, state.visible.length - 1),
+    Math.max(
+      0,
+      Math.floor(Math.max(0, scroll.scrollTop - HEADER_HEIGHT) / ROW_HEIGHT) -
+        8,
+    ),
+  );
+  const end = Math.min(
+    state.visible.length,
+    start + Math.ceil(scroll.clientHeight / ROW_HEIGHT) + 18,
+  );
+  const rows = [];
+  const spacer = (height) =>
+    `<tr class="spacer-row" aria-hidden="true"><td colspan="5" style="height:${height}px"></td></tr>`;
+  if (start) rows.push(spacer(start * ROW_HEIGHT));
+  for (let position = start; position < end; position++) {
+    const index = state.visible[position],
+      frame = state.trace.frames[index];
+    const marked = state.breakpoints.has(index);
+    const instruction = frame.mnemonic || ".byte";
+    const operands = frame.mnemonic
+      ? frame.operands
+      : Emtr.opcodeHex(frame.opcode);
+    rows.push(`<tr data-index="${index}" class="${index === state.index ? "selected" : ""}" aria-selected="${index === state.index}">
+      <td><button class="breakpoint-toggle ${marked ? "marked" : ""}" data-breakpoint="${index}" aria-label="${marked ? "Remove breakpoint from" : "Set breakpoint on"} frame ${index + 1}" aria-pressed="${marked}" title="Breakpoint frame">${marked ? "◆" : "◇"}</button></td>
+      <td>${index + 1}</td><td>${Emtr.hex(frame.address, frame.archId)}</td><td class="opcode" title="${Emtr.opcodeHex(frame.opcode)}">${Emtr.opcodeHex(frame.opcode)}</td>
+      <td class="instruction" title="${escapeHTML(instruction + " " + operands)}"><b>${escapeHTML(instruction)}</b> ${escapeHTML(operands)}</td></tr>`);
+  }
+  if (end < state.visible.length)
+    rows.push(spacer((state.visible.length - end) * ROW_HEIGHT));
+  $("disasm-body").innerHTML = rows.join("");
+}
 
-document.addEventListener('dragover', e => {
-  e.preventDefault();
-  overlay.classList.remove('hidden');
-  dropBox.classList.add('drag-over');
+function selectFrame(index, { reveal = true } = {}) {
+  if (
+    !state.trace ||
+    !Number.isInteger(index) ||
+    index < 0 ||
+    index >= state.trace.nFrames
+  )
+    return;
+  state.index = index;
+  const frame = state.trace.frames[index];
+  $("frame-input").value = index + 1;
+  $("frame-slider").value = index;
+  $("status-detail").textContent =
+    `${Emtr.hex(frame.address, frame.archId)} · ${Emtr.architectures[frame.archId].name}`;
+  const visits = state.hits.get(frame.address);
+  $("execution-caption").textContent =
+    `${Emtr.hex(frame.address, frame.archId)} · executed ${visits.toLocaleString()} ${visits === 1 ? "time" : "times"}`;
+  if (reveal) {
+    if (state.onlyBreakpoints && !state.breakpoints.has(index)) {
+      state.onlyBreakpoints = false;
+      rebuildVisible();
+    }
+    const position = state.onlyBreakpoints
+      ? state.visible.indexOf(index)
+      : index;
+    const scroll = $("disasm-scroll"),
+      top = position * ROW_HEIGHT;
+    if (top < scroll.scrollTop) scroll.scrollTop = top;
+    else if (
+      top + ROW_HEIGHT >
+      scroll.scrollTop + scroll.clientHeight - HEADER_HEIGHT
+    )
+      scroll.scrollTop = top + ROW_HEIGHT - scroll.clientHeight + HEADER_HEIGHT;
+  }
+  renderInstructions();
+  state.highlights = state.changeHistory(index);
+  renderRegisters();
+  renderStack();
+  updateSearchInfo();
+  $("pb-first").disabled = $("pb-prev").disabled = index === 0;
+  $("pb-next").disabled = $("pb-last").disabled =
+    index === state.trace.nFrames - 1;
+  if (index === state.trace.nFrames - 1) stopPlayback();
+}
+
+function renderRegisters() {
+  if (!state.trace?.nFrames) return;
+  const frame = state.trace.frames[state.index],
+    previous = state.trace.frames[state.index - 1];
+  const spec = Emtr.architectures[frame.archId];
+  const changes = state.highlights.registers;
+  $("reg-count").textContent = Object.keys(frame.regs).length;
+  $("register-summary").textContent = previous
+    ? `${changes.size} highlighted · ${state.highlights.registerFrame >= 0 ? `last register update at frame ${state.highlights.registerFrame + 1}` : "instruction pointer only"}`
+    : "Initial captured state";
+  const entries = Object.entries(frame.regs).filter(
+    ([name]) => !$("changed-only").checked || changes.has(name),
+  );
+  $("reg-body").innerHTML =
+    entries
+      .map(([name, value]) => {
+        const role = name === spec.sp ? "SP" : name === spec.pc ? "PC" : "";
+        return `<tr class="${changes.has(name) ? "changed" : ""}"><td>${escapeHTML(name)}${role && role !== name ? `<span class="reg-role">${role}</span>` : ""}</td><td>${Emtr.hex(value, frame.archId)}</td><td>${changes.has(name) ? Emtr.hex(changes.get(name), frame.archId) : "—"}</td></tr>`;
+      })
+      .join("") ||
+    '<tr><td colspan="3" class="panel-empty">No register changes in this frame.</td></tr>';
+  const flagValue = frame.regs[spec.flags];
+  let flags = [];
+  if (spec.flags === "EFLAGS")
+    flags = [
+      ["CF", 0],
+      ["PF", 2],
+      ["AF", 4],
+      ["ZF", 6],
+      ["SF", 7],
+      ["TF", 8],
+      ["IF", 9],
+      ["DF", 10],
+      ["OF", 11],
+    ];
+  if (["CPSR", "NZCV", "XPSR"].includes(spec.flags))
+    flags = [
+      ["N", 31],
+      ["Z", 30],
+      ["C", 29],
+      ["V", 28],
+      ...(spec.flags === "CPSR"
+        ? [["T", 5]]
+        : spec.flags === "XPSR"
+          ? [["T", 24]]
+          : []),
+    ];
+  if (spec.flags === "SR")
+    flags = [
+      ["X", 4],
+      ["N", 3],
+      ["Z", 2],
+      ["V", 1],
+      ["C", 0],
+    ];
+  $("flags-area").innerHTML =
+    flagValue === undefined
+      ? ""
+      : flags
+          .map(
+            ([name, bit]) =>
+              `<span class="flag ${flagValue & (1n << BigInt(bit)) ? "on" : ""}" title="${name}: ${Number((flagValue >> BigInt(bit)) & 1n)}">${name} ${Number((flagValue >> BigInt(bit)) & 1n)}</span>`,
+          )
+          .join("");
+}
+
+function renderStack() {
+  const frame = state.trace.frames[state.index],
+    previous = state.trace.frames[state.index - 1];
+  const changes = Emtr.stackChanges(frame, previous);
+  $("stack-address").textContent = `SP ${Emtr.hex(frame.sp, frame.archId)}`;
+  $("stack-size").textContent = `${frame.stack.length} bytes`;
+  $("byte-order").textContent =
+    `${Emtr.architectures[frame.archId].endian === "big" ? "Big" : "Little"} endian`;
+  state.stackChanges = changes;
+  renderStackRows();
+  $("stack-summary").textContent = previous
+    ? `${changes.filter((c) => c === "changed").length} changed · ${changes.filter((c) => c === "new").length} newly visible${state.highlights.stackFrame >= 0 ? ` · red: frame ${state.highlights.stackFrame + 1}` : ""}`
+    : "Initial memory snapshot";
+}
+
+function renderStackRows() {
+  if (!state.trace?.nFrames) return;
+  const frame = state.trace.frames[state.index],
+    changes = state.stackChanges;
+  const scroll = $("stack-scroll"),
+    rowHeight = ROW_HEIGHT;
+  const asValues = $("stack-format").value === "values";
+  const wordSize = Emtr.architectures[frame.archId].bits / 8;
+  const rowBytes = asValues ? wordSize : 8;
+  $("stack-value-heading").textContent = asValues
+    ? `Value · ${wordSize * 8}-bit`
+    : "Bytes · address order";
+  const count = Math.ceil(frame.stack.length / rowBytes);
+  const start = Math.min(
+    Math.max(0, count - 1),
+    Math.max(
+      0,
+      Math.floor(Math.max(0, scroll.scrollTop - HEADER_HEIGHT) / rowHeight) - 4,
+    ),
+  );
+  const end = Math.min(
+    count,
+    start + Math.ceil(scroll.clientHeight / rowHeight) + 10,
+  );
+  const rows = [];
+  const spacer = (height) =>
+    `<tr class="spacer-row" aria-hidden="true"><td colspan="3" style="height:${height}px"></td></tr>`;
+  if (start) rows.push(spacer(start * rowHeight));
+  for (
+    let offset = start * rowBytes;
+    offset < end * rowBytes;
+    offset += rowBytes
+  ) {
+    const chunk = frame.stack.subarray(offset, offset + rowBytes);
+    const ordered = asValues
+      ? Emtr.stackWord(chunk, frame.archId).bytes
+      : Array.from(chunk, (value, offset) => ({ value, offset }));
+    const bytes = ordered
+      .map(({ value, offset: byteOffset }) => {
+        if (value === undefined)
+          return '<span class="byte unknown" title="Byte not captured">??</span>';
+        const index = offset + byteOffset;
+        return `<span class="byte ${changes[index]} ${state.highlights.stack.has(index) ? "highlighted" : ""}" data-stack-offset="${index}" title="${Emtr.hex(frame.sp + BigInt(index), frame.archId)} · ${changes[index] === "new" ? "Not captured in preceding frame" : changes[index]}">${Emtr.hexByte(value)}</span>`;
+      })
+      .join(asValues ? "" : " ");
+    const ascii = Array.from(chunk, (value) =>
+      value >= 32 && value < 127 ? String.fromCharCode(value) : ".",
+    ).join("");
+    rows.push(
+      `<tr data-stack-row="${offset}"><td>${Emtr.hex(frame.sp + BigInt(offset), frame.archId)}</td><td class="stack-value ${asValues && Array.from(chunk, (_, i) => state.highlights.stack.has(offset + i)).some(Boolean) ? "highlighted" : ""}">${bytes}</td><td>${escapeHTML(ascii)}</td></tr>`,
+    );
+  }
+  if (end < count) rows.push(spacer((count - end) * rowHeight));
+  $("stack-body").innerHTML =
+    rows.join("") ||
+    '<tr><td colspan="3" class="panel-empty">No stack bytes captured at this address.<br>The stack may be unmapped or capture disabled.</td></tr>';
+}
+
+function clearPanels() {
+  $("reg-body").innerHTML =
+    '<tr><td class="panel-empty">No register state captured.</td></tr>';
+  $("stack-body").innerHTML =
+    '<tr><td class="panel-empty">No stack snapshot captured.</td></tr>';
+  for (const id of [
+    "reg-count",
+    "flags-area",
+    "register-summary",
+    "stack-address",
+    "stack-size",
+    "stack-summary",
+    "byte-order",
+  ])
+    $(id).textContent = "";
+  $("execution-caption").textContent = "No instruction frames";
+  $("status-detail").textContent = "Empty trace";
+  $("frame-input").value = 1;
+  $("frame-slider").value = 0;
+}
+
+function toggleBreakpoint(index) {
+  if (!state.trace?.frames[index]) return;
+  if (state.breakpoints.has(index)) state.breakpoints.delete(index);
+  else state.breakpoints.add(index);
+  rebuildVisible();
+}
+function stopPlayback() {
+  if (state.timer !== null) clearInterval(state.timer);
+  state.timer = null;
+  $("pb-play").textContent = "▶";
+  $("pb-play").setAttribute("aria-label", "Play");
+  $("pb-play").setAttribute("aria-pressed", "false");
+}
+function togglePlay() {
+  if (state.timer !== null) {
+    stopPlayback();
+    return;
+  }
+  if (!state.trace?.nFrames) return;
+  if (state.index === state.trace.nFrames - 1) selectFrame(0);
+  $("pb-play").textContent = "Ⅱ";
+  $("pb-play").setAttribute("aria-label", "Pause");
+  $("pb-play").setAttribute("aria-pressed", "true");
+  state.timer = setInterval(
+    () => {
+      selectFrame(state.index + 1);
+      if (
+        state.breakpoints.has(state.index) ||
+        state.index >= state.trace.nFrames - 1
+      )
+        stopPlayback();
+    },
+    Number($("play-speed").value),
+  );
+}
+function navigate(index) {
+  stopPlayback();
+  selectFrame(index);
+}
+
+function search() {
+  const query = $("search-input").value.trim().toLowerCase();
+  state.query = query;
+  state.matches = [];
+  if (!query || !state.trace) {
+    $("search-info").textContent = "";
+    return;
+  }
+  state.trace.frames.forEach((frame, index) => {
+    if (
+      `${Emtr.hex(frame.address, frame.archId)} ${frame.mnemonic} ${frame.operands} ${Emtr.opcodeHex(frame.opcode)}`
+        .toLowerCase()
+        .includes(query)
+    )
+      state.matches.push(index);
+  });
+  if (state.matches.length) {
+    const match =
+      state.matches.find((index) => index >= state.index) ?? state.matches[0];
+    navigate(match);
+  }
+  updateSearchInfo();
+}
+function updateSearchInfo() {
+  const position = state.matches.indexOf(state.index);
+  $("search-info").textContent = !state.query
+    ? ""
+    : state.matches.length
+      ? `${position < 0 ? "—" : position + 1} / ${state.matches.length}`
+      : "No matches";
+}
+function searchNext(direction = 1) {
+  clearTimeout(searchTimer);
+  if (state.query !== $("search-input").value.trim().toLowerCase()) {
+    search();
+    return;
+  }
+  if (!state.matches.length) return;
+  const matches = state.matches;
+  const target =
+    direction > 0
+      ? (matches.find((index) => index > state.index) ?? matches[0])
+      : (matches
+          .slice()
+          .reverse()
+          .find((index) => index < state.index) ?? matches[matches.length - 1]);
+  navigate(target);
+  updateSearchInfo();
+}
+function followRegister(direction) {
+  const name = $("watch-register").value;
+  if (!name || !state.trace) return;
+  for (
+    let index = state.index + direction;
+    index > 0 && index < state.trace.nFrames;
+    index += direction
+  ) {
+    if (
+      Emtr.registerChanges(
+        state.trace.frames[index],
+        state.trace.frames[index - 1],
+      ).includes(name)
+    ) {
+      navigate(index);
+      status(`${name} changed at frame ${index + 1}.`);
+      return;
+    }
+  }
+  status(`No ${direction > 0 ? "later" : "earlier"} changes to ${name}.`);
+}
+
+$("open-file").onclick = $("welcome-open").onclick = () =>
+  $("file-input").click();
+$("file-input").onchange = (event) => {
+  handleFile(event.target.files[0]);
+  event.target.value = "";
+};
+$("load-demo").onclick = () => {
+  if (typeof DEMO_TRACE_BASE64 === "undefined") {
+    status("Example trace is unavailable.", true);
+    return;
+  }
+  loadBuffer(
+    Uint8Array.from(atob(DEMO_TRACE_BASE64), (c) => c.charCodeAt(0)).buffer,
+    "example_x86_64.emtr",
+  );
+};
+$("disasm-scroll").addEventListener("scroll", () => {
+  if (!scrollRequest)
+    scrollRequest = requestAnimationFrame(() => {
+      scrollRequest = null;
+      renderInstructions();
+    });
 });
-document.addEventListener('dragleave', e => {
-  if (!e.relatedTarget || e.relatedTarget === document.documentElement) {
-    overlay.classList.add('hidden');
-    dropBox.classList.remove('drag-over');
+new ResizeObserver(renderInstructions).observe($("disasm-scroll"));
+let stackScrollRequest;
+$("stack-scroll").addEventListener("scroll", () => {
+  if (!stackScrollRequest)
+    stackScrollRequest = requestAnimationFrame(() => {
+      stackScrollRequest = null;
+      renderStackRows();
+    });
+});
+new ResizeObserver(renderStackRows).observe($("stack-scroll"));
+$("disasm-body").onclick = (event) => {
+  const breakpoint = event.target.closest("[data-breakpoint]");
+  if (breakpoint) {
+    toggleBreakpoint(Number(breakpoint.dataset.breakpoint));
+    return;
+  }
+  const row = event.target.closest("[data-index]");
+  if (row) navigate(Number(row.dataset.index));
+};
+$("disasm-body").ondblclick = (event) => {
+  if (event.target.closest("button")) return;
+  const row = event.target.closest("[data-index]");
+  if (row) toggleBreakpoint(Number(row.dataset.index));
+};
+$("show-all").onclick = () => {
+  if (state.trace) {
+    state.onlyBreakpoints = false;
+    $("disasm-scroll").scrollTop = 0;
+    rebuildVisible();
+  }
+};
+$("show-breakpoints").onclick = () => {
+  if (state.trace) {
+    stopPlayback();
+    state.onlyBreakpoints = true;
+    $("disasm-scroll").scrollTop = 0;
+    rebuildVisible();
+  }
+};
+$("pb-first").onclick = () => navigate(0);
+$("pb-prev").onclick = () => navigate(state.index - 1);
+$("pb-next").onclick = () => navigate(state.index + 1);
+$("pb-last").onclick = () => navigate(state.trace.nFrames - 1);
+$("pb-play").onclick = togglePlay;
+$("play-speed").onchange = () => {
+  if (state.timer !== null) {
+    stopPlayback();
+    togglePlay();
+  }
+};
+$("frame-slider").oninput = (event) => navigate(Number(event.target.value));
+$("frame-input").onchange = (event) => {
+  const index = Number(event.target.value) - 1;
+  if (state.trace?.nFrames)
+    navigate(Math.max(0, Math.min(state.trace.nFrames - 1, Math.trunc(index))));
+  event.target.value = state.index + 1;
+};
+$("changed-only").onchange = renderRegisters;
+$("stack-format").onchange = () => {
+  $("stack-scroll").scrollTop = 0;
+  renderStackRows();
+};
+$("watch-prev").onclick = () => followRegister(-1);
+$("watch-next").onclick = () => followRegister(1);
+$("search-input").oninput = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(search, 120);
+};
+$("search-input").onkeydown = (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    searchNext(event.shiftKey ? -1 : 1);
+  }
+};
+$("search-prev").onclick = () => searchNext(-1);
+$("search-next").onclick = () => searchNext(1);
+$("export-frame").onclick = () => {
+  if (!state.trace?.nFrames) return;
+  const blob = new Blob(
+    [Emtr.frameJSON(state.trace.frames[state.index], state.index) + "\n"],
+    { type: "application/json" },
+  );
+  const url = URL.createObjectURL(blob),
+    anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `emutrace-frame-${state.index + 1}.json`;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  status(`Exported frame ${state.index + 1} as JSON.`);
+};
+$("help-open").onclick = () => {
+  stopPlayback();
+  $("help-dialog").showModal();
+};
+$("help-close").onclick = () => $("help-dialog").close();
+let theme = window.matchMedia("(prefers-color-scheme: dark)").matches
+  ? "dark"
+  : "light";
+try {
+  theme = localStorage.getItem("emutrace-theme") || theme;
+} catch {
+  /* Storage may be disabled for local files. */
+}
+document.documentElement.dataset.theme = theme;
+$("theme-toggle").onclick = () => {
+  theme = theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = theme;
+  try {
+    localStorage.setItem("emutrace-theme", theme);
+  } catch {
+    /* Optional preference. */
+  }
+};
+document.addEventListener("keydown", (event) => {
+  if (
+    event.ctrlKey ||
+    event.metaKey ||
+    event.altKey ||
+    event.target.closest(
+      "input,select,textarea,button,[contenteditable=true]",
+    ) ||
+    $("help-dialog").open
+  )
+    return;
+  const actions = {
+    ArrowRight: () => navigate(state.index + 1),
+    n: () => navigate(state.index + 1),
+    ArrowLeft: () => navigate(state.index - 1),
+    p: () => navigate(state.index - 1),
+    " ": togglePlay,
+    Home: () => navigate(0),
+    End: () => navigate((state.trace?.nFrames || 0) - 1),
+    b: () => toggleBreakpoint(state.index),
+    F2: () => toggleBreakpoint(state.index),
+    "/": () => $("search-input").focus(),
+  };
+  if (actions[event.key]) {
+    event.preventDefault();
+    actions[event.key]();
   }
 });
-document.addEventListener('drop', e => {
-  e.preventDefault();
-  overlay.classList.add('hidden');
-  dropBox.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  if (file) handleFile(file);
+let dragDepth = 0;
+document.addEventListener("dragenter", (event) => {
+  if (Array.from(event.dataTransfer?.types || []).includes("Files")) {
+    event.preventDefault();
+    dragDepth++;
+    $("drop-overlay").hidden = false;
+  }
+});
+document.addEventListener("dragover", (event) => {
+  if (Array.from(event.dataTransfer?.types || []).includes("Files"))
+    event.preventDefault();
+});
+document.addEventListener("dragleave", () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) $("drop-overlay").hidden = true;
+});
+document.addEventListener("drop", (event) => {
+  event.preventDefault();
+  dragDepth = 0;
+  $("drop-overlay").hidden = true;
+  handleFile(event.dataTransfer?.files[0]);
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopPlayback();
 });

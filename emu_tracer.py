@@ -1,421 +1,377 @@
-"""
-Supported architectures
------------------------
-  ARM16   – Thumb / ARM  (UC_ARCH_ARM  + UC_MODE_THUMB)
-  ARM32   – ARM          (UC_ARCH_ARM  + UC_MODE_ARM)
-  ARM64   – AArch64      (UC_ARCH_ARM64)
-  X86     – IA-32        (UC_ARCH_X86  + UC_MODE_32)
-  X86_64  – AMD64        (UC_ARCH_X86  + UC_MODE_64)
-  MIPS    – MIPS32 BE    (UC_ARCH_MIPS + UC_MODE_MIPS32 + UC_MODE_BIG_ENDIAN)
-  MIPSEL  – MIPS32 LE    (UC_ARCH_MIPS + UC_MODE_MIPS32 + UC_MODE_LITTLE_ENDIAN)
-  MIPS64  – MIPS64 BE    (UC_ARCH_MIPS + UC_MODE_MIPS64 + UC_MODE_BIG_ENDIAN)
-  MIPS64EL– MIPS64 LE    (UC_ARCH_MIPS + UC_MODE_MIPS64 + UC_MODE_LITTLE_ENDIAN)
+"""Record Unicorn instruction-entry state and read portable EMTR traces.
 
-Wire format  (little-endian integers throughout)
--------------------------------------------------
-File header  (16 bytes)
-  [0:4]   magic      b"EMTR"
-  [4:8]   version    uint32  = 1
-  [8:12]  arch_id    uint32  (see ARCH_IDS below)
-  [12:16] n_frames   uint32  total instruction count
-
-Per-frame  (variable size)
-  [0:8]   address    uint64
-  [8:10]  opcode_len uint16  (1-15)
-  [10:]   opcode     bytes[opcode_len]
-  then    reg_block  (see below)
-  then    stack_block
-
-reg_block
-  [0:2]  n_regs    uint16
-  repeat n_regs times:
-  [0:1]  name_len  uint8
-  [1:]   name      bytes[name_len]   (ASCII)
-  [n:]   value     uint64
-
-stack_block
-  [0:8]   sp_value   uint64
-  [8:12]  n_bytes    uint32            (number of stack bytes captured)
-  [12:]   raw_bytes  bytes[n_bytes]    (from SP upward in memory)
-
-The file is then zlib-compressed (level 9) after the header so that on
-large traces the size stays manageable.  The header itself is NOT
-compressed so the viewer can read arch/count without decompressing.
-
-Usage
------
-  from emu_tracer import Tracer, ARCH
-
-  # Create a Unicorn emulator however you like:
-  import unicorn
-  mu = unicorn.Uc(unicorn.UC_ARCH_X86, unicorn.UC_MODE_64)
-  # ... map memory, write code, set registers ...
-
-  tracer = Tracer(mu, ARCH.X86_64)
-  tracer.attach()          # installs the hook
-
-  mu.emu_start(start, end)
-
-  tracer.save("trace.emtr")
-  # – or –
-  raw_bytes = tracer.dump()   # returns bytes
+EMTR v2 retains the 16-byte v1 header and zlib payload. Each v1 frame
+(address, opcode, named uint64 registers, stack address and bytes) is followed
+by <IHH: instruction architecture ID, mnemonic byte length, operand byte
+length, then both UTF-8 strings. Readers accept v1 and v2. All integers in
+both versions are little endian, independent of the emulated target. V2
+payloads begin with a uint32 flags word (bit 0: capture limit reached).
 """
 
 from __future__ import annotations
 
+import argparse
 import io
+import json
 import struct
 import zlib
-from enum import IntEnum
-from typing import Dict, List, Tuple
+from functools import lru_cache
+from pathlib import Path
 
-try:
-    import capstone
-    HAS_CAPSTONE = True
-except ImportError:
-    HAS_CAPSTONE = False
+from architectures import ARCH, ARCH_NAMES, ARCHITECTURES, detect_arch
+from architectures import SP_REG as SP_REG
 
-try:
-    import unicorn
-    import unicorn.arm_const as uc_arm
-    import unicorn.arm64_const as uc_arm64
-    import unicorn.x86_const as uc_x86
-    import unicorn.mips_const as uc_mips
-    HAS_UNICORN = True
-except ImportError:
-    HAS_UNICORN = False
-    unicorn = None
-
-class ARCH(IntEnum):
-    ARM16   = 0   # Thumb
-    ARM32   = 1
-    ARM64   = 2
-    X86     = 3
-    X86_64  = 4
-    MIPS    = 5
-    MIPSEL  = 6
-    MIPS64  = 7
-    MIPS64EL= 8
-
-
-ARCH_NAMES: Dict[ARCH, str] = {
-    ARCH.ARM16:    "ARM16 (Thumb)",
-    ARCH.ARM32:    "ARM32",
-    ARCH.ARM64:    "ARM64",
-    ARCH.X86:      "x86",
-    ARCH.X86_64:   "x86-64",
-    ARCH.MIPS:     "MIPS (BE)",
-    ARCH.MIPSEL:   "MIPS (LE)",
-    ARCH.MIPS64:   "MIPS64 (BE)",
-    ARCH.MIPS64EL: "MIPS64 (LE)",
-}
-
-# Register definitions per architecture: list of (name, unicorn_const)
-def _build_reg_maps() -> Dict[ARCH, List[Tuple[str, int]]]:
-    if not HAS_UNICORN:
-        return {}
-
-    arm_regs = [
-        ("R0",  uc_arm.UC_ARM_REG_R0),  ("R1",  uc_arm.UC_ARM_REG_R1),
-        ("R2",  uc_arm.UC_ARM_REG_R2),  ("R3",  uc_arm.UC_ARM_REG_R3),
-        ("R4",  uc_arm.UC_ARM_REG_R4),  ("R5",  uc_arm.UC_ARM_REG_R5),
-        ("R6",  uc_arm.UC_ARM_REG_R6),  ("R7",  uc_arm.UC_ARM_REG_R7),
-        ("R8",  uc_arm.UC_ARM_REG_R8),  ("R9",  uc_arm.UC_ARM_REG_R9),
-        ("R10", uc_arm.UC_ARM_REG_R10), ("R11", uc_arm.UC_ARM_REG_R11),
-        ("R12", uc_arm.UC_ARM_REG_R12), ("SP",  uc_arm.UC_ARM_REG_SP),
-        ("LR",  uc_arm.UC_ARM_REG_LR),  ("PC",  uc_arm.UC_ARM_REG_PC),
-        ("CPSR",uc_arm.UC_ARM_REG_CPSR),
-    ]
-    arm64_regs = [
-        ("X0",  uc_arm64.UC_ARM64_REG_X0),  ("X1",  uc_arm64.UC_ARM64_REG_X1),
-        ("X2",  uc_arm64.UC_ARM64_REG_X2),  ("X3",  uc_arm64.UC_ARM64_REG_X3),
-        ("X4",  uc_arm64.UC_ARM64_REG_X4),  ("X5",  uc_arm64.UC_ARM64_REG_X5),
-        ("X6",  uc_arm64.UC_ARM64_REG_X6),  ("X7",  uc_arm64.UC_ARM64_REG_X7),
-        ("X8",  uc_arm64.UC_ARM64_REG_X8),  ("X9",  uc_arm64.UC_ARM64_REG_X9),
-        ("X10", uc_arm64.UC_ARM64_REG_X10), ("X11", uc_arm64.UC_ARM64_REG_X11),
-        ("X12", uc_arm64.UC_ARM64_REG_X12), ("X13", uc_arm64.UC_ARM64_REG_X13),
-        ("X14", uc_arm64.UC_ARM64_REG_X14), ("X15", uc_arm64.UC_ARM64_REG_X15),
-        ("X16", uc_arm64.UC_ARM64_REG_X16), ("X17", uc_arm64.UC_ARM64_REG_X17),
-        ("X18", uc_arm64.UC_ARM64_REG_X18), ("X19", uc_arm64.UC_ARM64_REG_X19),
-        ("X20", uc_arm64.UC_ARM64_REG_X20), ("X21", uc_arm64.UC_ARM64_REG_X21),
-        ("X22", uc_arm64.UC_ARM64_REG_X22), ("X23", uc_arm64.UC_ARM64_REG_X23),
-        ("X24", uc_arm64.UC_ARM64_REG_X24), ("X25", uc_arm64.UC_ARM64_REG_X25),
-        ("X26", uc_arm64.UC_ARM64_REG_X26), ("X27", uc_arm64.UC_ARM64_REG_X27),
-        ("X28", uc_arm64.UC_ARM64_REG_X28), ("X29", uc_arm64.UC_ARM64_REG_X29),
-        ("X30", uc_arm64.UC_ARM64_REG_X30), ("SP",  uc_arm64.UC_ARM64_REG_SP),
-        ("PC",  uc_arm64.UC_ARM64_REG_PC),
-    ]
-    x86_regs = [
-        ("EAX", uc_x86.UC_X86_REG_EAX), ("EBX", uc_x86.UC_X86_REG_EBX),
-        ("ECX", uc_x86.UC_X86_REG_ECX), ("EDX", uc_x86.UC_X86_REG_EDX),
-        ("ESI", uc_x86.UC_X86_REG_ESI), ("EDI", uc_x86.UC_X86_REG_EDI),
-        ("EBP", uc_x86.UC_X86_REG_EBP), ("ESP", uc_x86.UC_X86_REG_ESP),
-        ("EIP", uc_x86.UC_X86_REG_EIP), ("EFLAGS", uc_x86.UC_X86_REG_EFLAGS),
-        ("CS",  uc_x86.UC_X86_REG_CS),  ("DS",  uc_x86.UC_X86_REG_DS),
-        ("ES",  uc_x86.UC_X86_REG_ES),  ("FS",  uc_x86.UC_X86_REG_FS),
-        ("GS",  uc_x86.UC_X86_REG_GS),  ("SS",  uc_x86.UC_X86_REG_SS),
-    ]
-    x86_64_regs = [
-        ("RAX", uc_x86.UC_X86_REG_RAX), ("RBX", uc_x86.UC_X86_REG_RBX),
-        ("RCX", uc_x86.UC_X86_REG_RCX), ("RDX", uc_x86.UC_X86_REG_RDX),
-        ("RSI", uc_x86.UC_X86_REG_RSI), ("RDI", uc_x86.UC_X86_REG_RDI),
-        ("RBP", uc_x86.UC_X86_REG_RBP), ("RSP", uc_x86.UC_X86_REG_RSP),
-        ("RIP", uc_x86.UC_X86_REG_RIP), ("R8",  uc_x86.UC_X86_REG_R8),
-        ("R9",  uc_x86.UC_X86_REG_R9),  ("R10", uc_x86.UC_X86_REG_R10),
-        ("R11", uc_x86.UC_X86_REG_R11), ("R12", uc_x86.UC_X86_REG_R12),
-        ("R13", uc_x86.UC_X86_REG_R13), ("R14", uc_x86.UC_X86_REG_R14),
-        ("R15", uc_x86.UC_X86_REG_R15), ("EFLAGS", uc_x86.UC_X86_REG_EFLAGS),
-        ("CS",  uc_x86.UC_X86_REG_CS),  ("FS",  uc_x86.UC_X86_REG_FS),
-        ("GS",  uc_x86.UC_X86_REG_GS),
-    ]
-    mips_regs = [
-        ("zero", uc_mips.UC_MIPS_REG_0),  ("at",  uc_mips.UC_MIPS_REG_1),
-        ("v0",   uc_mips.UC_MIPS_REG_2),  ("v1",  uc_mips.UC_MIPS_REG_3),
-        ("a0",   uc_mips.UC_MIPS_REG_4),  ("a1",  uc_mips.UC_MIPS_REG_5),
-        ("a2",   uc_mips.UC_MIPS_REG_6),  ("a3",  uc_mips.UC_MIPS_REG_7),
-        ("t0",   uc_mips.UC_MIPS_REG_8),  ("t1",  uc_mips.UC_MIPS_REG_9),
-        ("t2",   uc_mips.UC_MIPS_REG_10), ("t3",  uc_mips.UC_MIPS_REG_11),
-        ("t4",   uc_mips.UC_MIPS_REG_12), ("t5",  uc_mips.UC_MIPS_REG_13),
-        ("t6",   uc_mips.UC_MIPS_REG_14), ("t7",  uc_mips.UC_MIPS_REG_15),
-        ("s0",   uc_mips.UC_MIPS_REG_16), ("s1",  uc_mips.UC_MIPS_REG_17),
-        ("s2",   uc_mips.UC_MIPS_REG_18), ("s3",  uc_mips.UC_MIPS_REG_19),
-        ("s4",   uc_mips.UC_MIPS_REG_20), ("s5",  uc_mips.UC_MIPS_REG_21),
-        ("s6",   uc_mips.UC_MIPS_REG_22), ("s7",  uc_mips.UC_MIPS_REG_23),
-        ("t8",   uc_mips.UC_MIPS_REG_24), ("t9",  uc_mips.UC_MIPS_REG_25),
-        ("k0",   uc_mips.UC_MIPS_REG_26), ("k1",  uc_mips.UC_MIPS_REG_27),
-        ("gp",   uc_mips.UC_MIPS_REG_28), ("sp",  uc_mips.UC_MIPS_REG_29),
-        ("fp",   uc_mips.UC_MIPS_REG_30), ("ra",  uc_mips.UC_MIPS_REG_31),
-        ("PC",   uc_mips.UC_MIPS_REG_PC),
-    ]
-
-    return {
-        ARCH.ARM16:    arm_regs,
-        ARCH.ARM32:    arm_regs,
-        ARCH.ARM64:    arm64_regs,
-        ARCH.X86:      x86_regs,
-        ARCH.X86_64:   x86_64_regs,
-        ARCH.MIPS:     mips_regs,
-        ARCH.MIPSEL:   mips_regs,
-        ARCH.MIPS64:   mips_regs,
-        ARCH.MIPS64EL: mips_regs,
-    }
-
-
-# SP register name per arch (used to locate the stack)
-SP_REG: Dict[ARCH, str] = {
-    ARCH.ARM16:    "SP",
-    ARCH.ARM32:    "SP",
-    ARCH.ARM64:    "SP",
-    ARCH.X86:      "ESP",
-    ARCH.X86_64:   "RSP",
-    ARCH.MIPS:     "sp",
-    ARCH.MIPSEL:   "sp",
-    ARCH.MIPS64:   "sp",
-    ARCH.MIPS64EL: "sp",
-}
-
-# How many bytes to capture above the SP
-STACK_CAPTURE_BYTES = 128
-
-# File format constants
-MAGIC   = b"EMTR"
-VERSION = 1
-
-# Header packer: magic(4) + version(4) + arch_id(4) + n_frames(4)
+MAGIC = b"EMTR"
+VERSION = 2
 HDR_STRUCT = struct.Struct("<4sIII")
+STACK_CAPTURE_BYTES = 128
+MAX_PAYLOAD_BYTES = 256 * 1024 * 1024
+MAX_FRAMES = 1_000_000
+MAX_STACK_BYTES = 1024 * 1024
+UINT64_MASK = (1 << 64) - 1
+
 
 class Tracer:
-    """
-    Attaches to a live Unicorn emulator instance and records a trace.
+    """Record scalar CPU registers and memory immediately BEFORE instructions.
 
-    Parameters
-    ----------
-    mu      : unicorn.Uc    – already-configured emulator
-    arch    : ARCH          – architecture selector
-    stack_capture : int     – how many bytes above SP to snapshot (default 128)
+    ``arch`` defaults to detection from the Unicorn instance. ARM/Thumb
+    transitions are recorded per frame. ``max_frames`` stops recording at the
+    limit, not emulation; ``truncated`` reports this. dump/save are snapshots
+    and do not detach. Use a context manager for exception-safe hook cleanup.
     """
 
     def __init__(
         self,
         mu,
-        arch: ARCH,
-        stack_capture: int = STACK_CAPTURE_BYTES,
-    ) -> None:
-        if not HAS_UNICORN:
-            raise ImportError("unicorn-engine is not installed.")
-        self._mu            = mu
-        self._arch          = arch
-        self._stack_capture = stack_capture
-        self._reg_map       = _build_reg_maps().get(arch, [])
-        self._sp_name       = SP_REG[arch]
-        self._frames: List[bytes] = []
-        self._hook_handle   = None
+        arch=None,
+        stack_capture=STACK_CAPTURE_BYTES,
+        *,
+        max_frames=MAX_FRAMES,
+        disassemble=True,
+    ):
+        import unicorn
 
-    def attach(self) -> None:
-        """Install the instruction hook into the emulator."""
-        self._hook_handle = self._mu.hook_add(
-            unicorn.UC_HOOK_CODE, self._on_insn
+        detected = detect_arch(mu)
+        self._arch = detected if arch is None else ARCH(arch)
+        spec = ARCHITECTURES[self._arch]
+        actual = ARCHITECTURES[detected]
+        # Thumb state can change between construction and emu_start().
+        arm_pair = (
+            spec.family == actual.family == "arm"
+            and spec.endian == actual.endian
+            and ("MCLASS" in spec.uc_modes) == ("MCLASS" in actual.uc_modes)
         )
+        if self._arch != detected and not arm_pair:
+            raise ValueError(f"{spec.name} does not match emulator mode {actual.name}")
+        if type(stack_capture) is not int or not 0 <= stack_capture <= MAX_STACK_BYTES:
+            raise ValueError(f"stack_capture must be between 0 and {MAX_STACK_BYTES}")
+        if type(max_frames) is not int or not 1 <= max_frames <= MAX_FRAMES:
+            raise ValueError(f"max_frames must be between 1 and {MAX_FRAMES}")
+        self._mu = mu
+        self._spec = spec
+        self._stack_capture = stack_capture
+        self._max_frames = max_frames
+        self._reg_map = spec.registers()
+        self._frames = []
+        self._hook_handle = None
+        self._decoders = {}
+        self._decode = lru_cache(maxsize=16384)(self._decode)
+        self._payload_size = 4
+        self._disassemble = disassemble
+        self.truncated = False
+        self._uc_error = unicorn.UcError
+        if disassemble:
+            import capstone  # Fail before emulation when a dependency is missing.
 
-    def detach(self) -> None:
-        """Remove the hook (called automatically by save/dump)."""
+            self._capstone = capstone
+            self._decoder(self._arch)
+
+    def _decoder(self, arch):
+        if arch not in self._decoders:
+            spec = ARCHITECTURES[arch]
+            cs_arch, mode = spec.capstone_config()
+            if arch == ARCH.ARM64BE:
+                mode = 0  # A64 instruction encoding does not follow data endianness.
+            self._decoders[arch] = self._capstone.Cs(cs_arch, mode)
+        return self._decoders[arch]
+
+    def attach(self):
+        """Install the hook once; repeated calls are harmless."""
+        import unicorn
+
+        if self._hook_handle is None:
+            self._hook_handle = self._mu.hook_add(unicorn.UC_HOOK_CODE, self._on_insn)
+        return self
+
+    def detach(self):
         if self._hook_handle is not None:
             self._mu.hook_del(self._hook_handle)
             self._hook_handle = None
 
-    def save(self, path: str) -> None:
-        """Serialise the trace to *path*."""
-        with open(path, "wb") as fh:
-            fh.write(self.dump())
+    def __enter__(self):
+        return self.attach()
 
-    def dump(self) -> bytes:
-        """Return the serialised trace as a bytes object."""
-        payload = b"".join(self._frames)
-        compressed = zlib.compress(payload, level=9)
-        header = HDR_STRUCT.pack(MAGIC, VERSION, int(self._arch), len(self._frames))
-        return header + compressed
+    def __exit__(self, *_exc):
+        self.detach()
+
+    def clear(self):
+        """Discard captured frames; an attached tracer continues recording."""
+        self._frames.clear()
+        self._payload_size = 4
+        self.truncated = False
+        self._decode.cache_clear()
 
     @property
-    def frame_count(self) -> int:
+    def frame_count(self):
         return len(self._frames)
 
-    def _on_insn(self, mu, address: int, size: int, user_data) -> None:
-        buf = io.BytesIO()
+    def _decode(self, arch, address, opcode):
+        if not self._disassemble:
+            return "", ""
+        instruction = next(self._decoder(arch).disasm_lite(opcode, address, count=1), None)
+        return (instruction[2], instruction[3]) if instruction else ("", "")
 
-        # --- address (8 bytes) + opcode ---
-        opcode = mu.mem_read(address, size)
-        opcode_bytes = bytes(opcode)
-        buf.write(struct.pack("<QH", address, len(opcode_bytes)))
-        buf.write(opcode_bytes)
-
-        # --- registers ---
-        reg_vals: List[Tuple[str, int]] = []
-        sp_val = 0
-        for name, uc_id in self._reg_map:
-            try:
-                val = mu.reg_read(uc_id)
-            except Exception:
-                val = 0
-            reg_vals.append((name, val))
-            if name == self._sp_name:
-                sp_val = val
-
-        buf.write(struct.pack("<H", len(reg_vals)))
-        for name, val in reg_vals:
-            enc = name.encode("ascii")
-            buf.write(struct.pack("<B", len(enc)))
-            buf.write(enc)
-            buf.write(struct.pack("<Q", val))
-
-        # --- stack snapshot ---
+    def _read_stack(self, address):
+        if not self._stack_capture:
+            return b""
         try:
-            stack_raw = bytes(mu.mem_read(sp_val, self._stack_capture))
-        except Exception:
-            stack_raw = b""
-        buf.write(struct.pack("<QI", sp_val, len(stack_raw)))
-        buf.write(stack_raw)
+            return bytes(self._mu.mem_read(address, self._stack_capture))
+        except self._uc_error:
+            # Preserve the readable prefix, even across adjacent memory mappings.
+            result = bytearray()
+            cursor = address
+            for start, end, _permissions in sorted(self._mu.mem_regions()):
+                if start <= cursor <= end:
+                    count = min(end - cursor + 1, self._stack_capture - len(result))
+                    try:
+                        result.extend(self._mu.mem_read(cursor, count))
+                    except self._uc_error:
+                        break
+                    cursor += count
+                    if len(result) == self._stack_capture:
+                        break
+                elif start > cursor:
+                    break
+            return bytes(result)
 
-        self._frames.append(buf.getvalue())
+    def _on_insn(self, mu, address, size, _user_data):
+        if self.frame_count >= self._max_frames:
+            self.truncated = True
+            self.detach()
+            return
+        # Some invalid instructions report a sentinel size (e.g. 0xf1f1f1f1).
+        if not 1 <= size <= 32:
+            raise ValueError(f"Invalid instruction size {size} at {address:#x}")
+        opcode = bytes(mu.mem_read(address, size))
+        # Do not silently replace failed register reads with fictitious zeros.
+        regs = {name: int(mu.reg_read(reg)) & UINT64_MASK for name, reg in self._reg_map}
+        arch = self._arch
+        if self._spec.family == "arm" and arch != ARCH.ARM_MCLASS:
+            thumb = bool(regs["CPSR"] & (1 << 5))
+            arch = (
+                (ARCH.ARM16BE if thumb else ARCH.ARM32BE)
+                if self._spec.endian == "big"
+                else (ARCH.ARM16 if thumb else ARCH.ARM32)
+            )
+        sp = regs[self._spec.sp]
+        # x86 real-mode stack addresses include the SS segment base.
+        if arch == ARCH.X86_16:
+            sp += regs["SS"] << 4
+        # SPARC V9 uses a biased stack pointer under the 64-bit ABI.
+        if arch == ARCH.SPARC64 and sp & 1:
+            sp = (sp + 2047) & UINT64_MASK
+        stack = self._read_stack(sp)
+        buf = io.BytesIO()
+        buf.write(struct.pack("<QH", address, len(opcode)))
+        buf.write(opcode)
+        buf.write(struct.pack("<H", len(regs)))
+        for name, value in regs.items():
+            encoded = name.encode("ascii")
+            buf.write(struct.pack("<B", len(encoded)) + encoded + struct.pack("<Q", value))
+        buf.write(struct.pack("<QI", sp, len(stack)))
+        buf.write(stack)
+        mnemonic, operands = (text.encode("utf-8") for text in self._decode(arch, address, opcode))
+        extension = (
+            struct.pack("<IHH", int(arch), len(mnemonic), len(operands)) + mnemonic + operands
+        )
+        frame = buf.getvalue()
+        if self._payload_size + len(frame) + len(extension) > MAX_PAYLOAD_BYTES:
+            self.truncated = True
+            self.detach()
+            return
+        self._payload_size += len(frame) + len(extension)
+        self._frames.append((frame, extension))
+
+    def dump(self, *, version=VERSION):
+        """Serialize current frames without changing attachment state."""
+        if version not in (1, 2):
+            raise ValueError(f"Unsupported version: {version}")
+        compressor = zlib.compressobj(level=6)
+        chunks = [HDR_STRUCT.pack(MAGIC, version, int(self._arch), self.frame_count)]
+        if version == 2:
+            chunks.append(compressor.compress(struct.pack("<I", int(self.truncated))))
+        for frame, extension in self._frames:
+            chunks.append(compressor.compress(frame))
+            if version == 2:
+                chunks.append(compressor.compress(extension))
+        chunks.append(compressor.flush())
+        return b"".join(chunks)
+
+    def save(self, path, *, version=VERSION):
+        Path(path).write_bytes(self.dump(version=version))
+
+
+class _Cursor:
+    def __init__(self, payload):
+        self.data = payload
+        self.offset = 0
+
+    def take(self, size):
+        end = self.offset + size
+        if end > len(self.data):
+            raise ValueError(f"Truncated frame at payload byte {self.offset}")
+        result = self.data[self.offset : end]
+        self.offset = end
+        return result
+
+    def unpack(self, fmt):
+        return struct.unpack(fmt, self.take(struct.calcsize(fmt)))
+
+    def text(self, size, encoding="utf-8"):
+        try:
+            return self.take(size).decode(encoding)
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Invalid {encoding} text in trace") from exc
+
 
 class TraceReader:
-    """
-    Parses a .emtr file produced by :class:`Tracer`.
+    """Bounded, strict v1/v2 reader. Failed loads retain the previous trace."""
 
-    Attributes
-    ----------
-    arch        : ARCH
-    arch_name   : str
-    n_frames    : int
-    frames      : list of dicts  (populated after calling load() / loads())
+    def __init__(self, *, max_payload_bytes=MAX_PAYLOAD_BYTES, max_frames=MAX_FRAMES):
+        if max_payload_bytes < 0 or max_frames < 0:
+            raise ValueError("Reader limits must be nonnegative")
+        self.max_payload_bytes = max_payload_bytes
+        self.max_frames = max_frames
+        self.arch = ARCH.X86_64
+        self.arch_name = ""
+        self.version = VERSION
+        self.n_frames = 0
+        self.frames = []
+        self.truncated = False
 
-    Each frame dict::
+    def load(self, path):
+        with open(path, "rb") as file:
+            self.loads(file.read(self.max_payload_bytes + HDR_STRUCT.size + 1))
+        return self
 
-        {
-          "address":  int,
-          "opcode":   bytes,
-          "regs":     { name: value, ... },
-          "sp":       int,
-          "stack":    bytes,
-        }
-    """
-
-    def __init__(self) -> None:
-        self.arch: ARCH = ARCH.X86_64
-        self.arch_name: str = ""
-        self.n_frames: int = 0
-        self.frames: List[dict] = []
-
-    def load(self, path: str) -> None:
-        with open(path, "rb") as fh:
-            self.loads(fh.read())
-
-    def loads(self, data: bytes) -> None:
-        hdr_size = HDR_STRUCT.size          # 16
-        magic, version, arch_id, n_frames = HDR_STRUCT.unpack_from(data, 0)
+    def loads(self, data):
+        if len(data) < HDR_STRUCT.size:
+            raise ValueError("Truncated EMTR header (expected 16 bytes)")
+        if len(data) > self.max_payload_bytes + HDR_STRUCT.size:
+            raise ValueError("Compressed trace exceeds size limit")
+        magic, version, arch_id, count = HDR_STRUCT.unpack_from(data)
         if magic != MAGIC:
-            raise ValueError(f"Bad magic: {magic!r}")
-        if version != VERSION:
-            raise ValueError(f"Unsupported version: {version}")
-
-        self.arch      = ARCH(arch_id)
-        self.arch_name = ARCH_NAMES.get(self.arch, str(self.arch))
-        self.n_frames  = n_frames
-
-        payload = zlib.decompress(data[hdr_size:])
-        off = 0
+            raise ValueError("Not an EMTR trace (bad magic)")
+        if version not in (1, 2):
+            raise ValueError(f"Unsupported EMTR version: {version}")
+        try:
+            arch = ARCH(arch_id)
+        except ValueError as exc:
+            raise ValueError(f"Unknown architecture ID: {arch_id}") from exc
+        if count > self.max_frames:
+            raise ValueError("Trace exceeds frame limit")
+        try:
+            inflater = zlib.decompressobj()
+            payload = inflater.decompress(data[HDR_STRUCT.size :], self.max_payload_bytes + 1)
+        except zlib.error as exc:
+            raise ValueError("Invalid compressed trace payload") from exc
+        if len(payload) > self.max_payload_bytes or inflater.unconsumed_tail:
+            raise ValueError("Trace exceeds decompression limit")
+        if not inflater.eof or inflater.unused_data:
+            raise ValueError("Truncated or trailing compressed data")
+        cur = _Cursor(payload)
+        flags = cur.unpack("<I")[0] if version == 2 else 0
+        if flags & ~1:
+            raise ValueError("Unknown trace flags")
         frames = []
-
-        for _ in range(n_frames):
-            address, opcode_len = struct.unpack_from("<QH", payload, off)
-            off += 10
-            opcode = payload[off:off + opcode_len]
-            off += opcode_len
-
-            (n_regs,) = struct.unpack_from("<H", payload, off); off += 2
-            regs: Dict[str, int] = {}
+        for _ in range(count):
+            address, size = cur.unpack("<QH")
+            if not 1 <= size <= 32:
+                raise ValueError("Invalid opcode length")
+            opcode = cur.take(size)
+            (n_regs,) = cur.unpack("<H")
+            if n_regs > 512:
+                raise ValueError("Too many registers")
+            regs = {}
             for _ in range(n_regs):
-                (name_len,) = struct.unpack_from("<B", payload, off); off += 1
-                name = payload[off:off + name_len].decode("ascii"); off += name_len
-                (val,) = struct.unpack_from("<Q", payload, off); off += 8
-                regs[name] = val
+                (name_len,) = cur.unpack("<B")
+                name = cur.text(name_len, "ascii")
+                if not name or not name.isidentifier() or name in regs:
+                    raise ValueError("Invalid or duplicate register name")
+                (regs[name],) = cur.unpack("<Q")
+            sp, stack_size = cur.unpack("<QI")
+            if stack_size > MAX_STACK_BYTES:
+                raise ValueError("Stack snapshot exceeds limit")
+            stack = cur.take(stack_size)
+            frame = dict(address=address, opcode=opcode, regs=regs, sp=sp, stack=stack)
+            if version == 2:
+                frame_arch, mnemonic_size, operands_size = cur.unpack("<IHH")
+                if frame_arch not in ARCHITECTURES:
+                    raise ValueError(f"Unknown frame architecture ID: {frame_arch}")
+                frame.update(
+                    arch=ARCH(frame_arch),
+                    mnemonic=cur.text(mnemonic_size),
+                    operands=cur.text(operands_size),
+                )
+            frames.append(frame)
+        if cur.offset != len(payload):
+            raise ValueError("Unexpected bytes after final frame")
+        self.arch, self.arch_name, self.version = arch, ARCH_NAMES[arch], version
+        self.n_frames, self.frames = count, frames
+        self.truncated = bool(flags & 1)
+        return self
 
-            sp_val, n_stack = struct.unpack_from("<QI", payload, off); off += 12
-            stack_raw = payload[off:off + n_stack]; off += n_stack
 
-            frames.append({
-                "address": address,
-                "opcode":  opcode,
-                "regs":    regs,
-                "sp":      sp_val,
-                "stack":   stack_raw,
-            })
-
-        self.frames = frames
-
-def _to_json(path: str) -> str:
-    import json
-    r = TraceReader()
-    r.load(path)
-    out = {
-        "arch":     r.arch_name,
-        "n_frames": r.n_frames,
-        "frames": [
-            {
-                "address": f["address"],
-                "opcode":  f["opcode"].hex(),
-                "regs":    {k: v for k, v in f["regs"].items()},
-                "sp":      f["sp"],
-                "stack":   f["stack"].hex(),
-            }
-            for f in r.frames
-        ],
-    }
-    return json.dumps(out, indent=2)
+def _to_json(path):
+    reader = TraceReader().load(path)
+    # Hex strings preserve all 64 bits in JavaScript and other JSON consumers.
+    return json.dumps(
+        {
+            "arch": reader.arch_name,
+            "version": reader.version,
+            "n_frames": reader.n_frames,
+            "state_timing": "before instruction",
+            "truncated": reader.truncated,
+            "frames": [
+                {
+                    "address": hex(f["address"]),
+                    "opcode": f["opcode"].hex(),
+                    "regs": {k: hex(v) for k, v in f["regs"].items()},
+                    "sp": hex(f["sp"]),
+                    "stack": f["stack"].hex(),
+                    **(
+                        {
+                            "arch": int(f["arch"]),
+                            "mnemonic": f["mnemonic"],
+                            "operands": f["operands"],
+                        }
+                        if "arch" in f
+                        else {}
+                    ),
+                }
+                for f in reader.frames
+            ],
+        },
+        indent=2,
+    )
 
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) == 3 and sys.argv[1] == "dump":
-        print(_to_json(sys.argv[2]))
-    else:
-        print(__doc__)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=["dump"])
+    parser.add_argument("path")
+    args = parser.parse_args()
+    try:
+        print(_to_json(args.path))
+    except (ValueError, OSError) as exc:
+        parser.exit(1, f"emu_tracer: {exc}\n")

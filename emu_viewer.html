@@ -1,120 +1,381 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>EmuTrace Viewer</title>
-<link rel="stylesheet" href="emu_viewer.css">
-</head>
-<body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>EmuTrace — Execution, understood.</title>
+    <link rel="stylesheet" href="emu_viewer.css" />
+    <script defer src="emu_architectures.js"></script>
+    <script defer src="emu_core.js"></script>
+    <script defer src="demo_trace.js"></script>
+    <script defer src="emu_viewer.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <a class="brand" href="emu_viewer.html" aria-label="EmuTrace home"
+        ><span class="brand-mark" aria-hidden="true">≋</span>EmuTrace<span
+          class="brand-divider"
+        ></span
+        ><span class="brand-caption">Execution inspector</span></a
+      >
+      <div class="header-actions">
+        <span class="local-label"><span class="dot"></span>Local workspace</span
+        ><button
+          id="theme-toggle"
+          class="quiet"
+          title="Switch appearance"
+          aria-label="Switch appearance"
+        >
+          ◐</button
+        ><button
+          id="help-open"
+          class="quiet"
+          title="Keyboard shortcuts"
+          aria-label="Keyboard shortcuts"
+        >
+          ?</button
+        ><button id="open-file" class="primary">
+          <span aria-hidden="true">＋</span> Open trace
+        </button>
+      </div>
+      <input type="file" id="file-input" accept=".emtr" hidden />
+    </header>
 
-<!-- Top bar -->
-<div id="topbar">
-  <div id="logo">emu<span>trace</span></div>
-  <div id="arch-badge">NO TRACE</div>
-  <div id="frame-counter">—</div>
-  <div class="spacer"></div>
-  <div id="pb-controls">
-    <div class="pb-btn" id="pb-first"   title="First frame">⏮</div>
-    <div class="pb-btn" id="pb-prev"    title="Previous (←)">◀</div>
-    <div class="pb-btn" id="pb-play"    title="Play/Pause (Space)">▶</div>
-    <div class="pb-btn" id="pb-next"    title="Next (→)">▶▶</div>
-    <div class="pb-btn" id="pb-last"    title="Last frame">⏭</div>
-  </div>
-  <button class="tb-btn" id="btn-load" onclick="document.getElementById('file-input').click()">
-    ⬆ Load .emtr
-  </button>
-  <input type="file" id="file-input" accept=".emtr">
-</div>
-
-<!-- Search bar -->
-<div id="searchbar">
-  <span style="color:var(--text-dim);font-size:11px;font-family:var(--mono)">FIND:</span>
-  <input type="text" id="search-input" placeholder="address / mnemonic / operand …" spellcheck="false">
-  <div id="search-info"></div>
-</div>
-
-<!-- Frame slider -->
-<div id="slider-bar">
-  <span style="font-family:var(--mono);font-size:10px;color:var(--text-dim)">FRAME</span>
-  <input type="range" id="frame-slider" min="0" max="0" value="0">
-  <div id="slider-label">0 / 0</div>
-</div>
-
-<!-- Main layout -->
-<div id="main">
-
-  <!-- Disassembly panel -->
-  <div class="panel" id="disasm-panel">
-    <div class="panel-title">
-      DISASSEMBLY
-      <span class="badge" id="disasm-badge">0 insns</span>
-    </div>
-    <div id="disasm-scroll">
-      <table id="disasm-table">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>ADDRESS</th>
-            <th>OPCODES</th>
-            <th>MNEMONIC</th>
-            <th>OPERANDS</th>
-          </tr>
-        </thead>
-        <tbody id="disasm-body"></tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- Right column -->
-  <div id="right-col">
-
-    <!-- Registers panel -->
-    <div id="reg-panel" class="panel" style="border-right:none">
-      <div class="panel-title">REGISTERS</div>
-      <div id="reg-scroll">
-        <div id="reg-table">
-          <table id="reg-table-left"><tbody id="reg-body-left"></tbody></table>
-          <table id="reg-table-right"><tbody id="reg-body-right"></tbody></table>
+    <section id="welcome" class="welcome">
+      <div class="welcome-copy">
+        <p class="eyebrow">UNICORN EXECUTION TRACES</p>
+        <h1>Every instruction.<br />A clearer picture.</h1>
+        <p class="intro">
+          Follow execution, inspect registers, and see how memory changes. One
+          frame at a time.
+        </p>
+        <div class="welcome-actions">
+          <button id="welcome-open" class="primary">
+            Open a trace <span aria-hidden="true">↗</span></button
+          ><button id="load-demo">
+            Explore an example <span aria-hidden="true">→</span>
+          </button>
         </div>
-        <div id="flags-area" class="flags-row"></div>
+        <p class="file-hint">
+          Or drop an .emtr file anywhere. Your data stays on this device.
+        </p>
+      </div>
+      <div class="welcome-preview" aria-hidden="true">
+        <div class="preview-title">
+          <span>EXECUTION</span><span>x86-64</span>
+        </div>
+        <div class="preview-row">
+          <span>01</span><span>0x00400000</span><b>mov</b><span>rax, 0</span>
+        </div>
+        <div class="preview-row active">
+          <span>02</span><span>0x00400007</span><b>add</b><span>rax, 1</span>
+        </div>
+        <div class="preview-row">
+          <span>03</span><span>0x0040000b</span><b>push</b><span>rax</span>
+        </div>
+        <div class="preview-register">
+          <span>RAX</span><b>0x0000000000000001</b><span>← 0x0</span>
+        </div>
+        <p>From instruction to insight.</p>
+      </div>
+      <div class="welcome-footer">
+        <span>10 architecture families</span
+        ><span>Register & memory changes</span><span>Private by design</span>
+      </div>
+    </section>
+
+    <main id="workspace" hidden>
+      <section class="trace-heading">
+        <div class="trace-identity">
+          <p class="eyebrow">TRACE WORKSPACE</p>
+          <h1 id="trace-name">Untitled trace</h1>
+          <div class="trace-meta">
+            <span id="arch-name"></span><span id="trace-count"></span
+            ><span id="trace-unique"></span><span id="trace-size"></span>
+          </div>
+        </div>
+        <div class="snapshot-note">
+          <span class="dot"></span>Instruction-entry snapshots<small
+            >Red marks the latest changes in each panel</small
+          >
+        </div>
+      </section>
+      <section class="toolbar" aria-label="Trace navigation">
+        <div class="playback">
+          <button
+            id="pb-first"
+            class="icon-button"
+            data-trace
+            title="First frame (Home)"
+            aria-label="First frame"
+          >
+            ⇤</button
+          ><button
+            id="pb-prev"
+            class="icon-button"
+            data-trace
+            title="Previous frame (←)"
+            aria-label="Previous frame"
+          >
+            ←</button
+          ><button
+            id="pb-play"
+            class="icon-button play"
+            data-trace
+            title="Play / pause (Space)"
+            aria-label="Play"
+            aria-pressed="false"
+          >
+            ▶</button
+          ><button
+            id="pb-next"
+            class="icon-button"
+            data-trace
+            title="Next frame (→)"
+            aria-label="Next frame"
+          >
+            →</button
+          ><button
+            id="pb-last"
+            class="icon-button"
+            data-trace
+            title="Last frame (End)"
+            aria-label="Last frame"
+          >
+            ⇥</button
+          ><select id="play-speed" aria-label="Playback speed">
+            <option value="500">2 fps</option>
+            <option value="100" selected>10 fps</option>
+            <option value="33">30 fps</option>
+          </select>
+        </div>
+        <div class="toolbar-divider"></div>
+        <label class="frame-jump"
+          >Frame
+          <input
+            id="frame-input"
+            type="number"
+            min="1"
+            value="1"
+            data-trace
+            aria-label="Go to frame"
+          /><span id="frame-total">/ 0</span></label
+        ><input
+          id="frame-slider"
+          type="range"
+          min="0"
+          max="0"
+          value="0"
+          data-trace
+          aria-label="Execution timeline"
+        />
+        <button
+          id="export-frame"
+          class="quiet"
+          data-trace
+          title="Export selected frame as JSON"
+        >
+          Export frame ↗
+        </button>
+      </section>
+      <div class="inspector-grid">
+        <section
+          class="panel execution-panel"
+          aria-labelledby="execution-title"
+        >
+          <div class="panel-heading">
+            <h2 id="execution-title">Execution</h2>
+            <div class="segmented" aria-label="Execution view">
+              <button id="show-all" class="active" aria-pressed="true">
+                All frames</button
+              ><button id="show-breakpoints" aria-pressed="false">
+                Breakpoints <span id="breakpoint-count">0</span>
+              </button>
+            </div>
+          </div>
+          <div class="search-bar">
+            <span aria-hidden="true">⌕</span
+            ><input
+              type="search"
+              id="search-input"
+              placeholder="Find address, instruction, operand, or bytes"
+              aria-label="Search instructions"
+              spellcheck="false"
+            /><span id="search-info" aria-live="polite"></span
+            ><button
+              id="search-prev"
+              class="quiet"
+              title="Previous match (Shift+Enter)"
+              aria-label="Previous search match"
+            >
+              ↑</button
+            ><button
+              id="search-next"
+              class="quiet"
+              title="Next match (Enter)"
+              aria-label="Next search match"
+            >
+              ↓
+            </button>
+          </div>
+          <div id="disasm-scroll" tabindex="0" aria-label="Instruction list">
+            <table id="disasm-table">
+              <colgroup>
+                <col class="breakpoint-col" />
+                <col class="frame-col" />
+                <col class="address-col" />
+                <col class="bytes-col" />
+                <col />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th><span class="sr-only">Breakpoint</span></th>
+                  <th>Frame</th>
+                  <th>Address</th>
+                  <th>Bytes</th>
+                  <th>Instruction</th>
+                </tr>
+              </thead>
+              <tbody id="disasm-body"></tbody>
+            </table>
+            <p id="empty-list" class="panel-empty" hidden>
+              No breakpoints. Press B to set one on the selected frame.
+            </p>
+          </div>
+          <div class="panel-footer">
+            <span id="execution-caption"
+              >Select a frame to inspect its state</span
+            ><span><kbd>B</kbd> Breakpoint</span>
+          </div>
+        </section>
+        <div class="state-column">
+          <section
+            class="panel register-panel"
+            aria-labelledby="register-title"
+          >
+            <div class="panel-heading">
+              <h2 id="register-title">
+                Registers <span id="reg-count" class="count"></span>
+              </h2>
+              <label class="toggle-label"
+                ><input id="changed-only" type="checkbox" /> Changes only</label
+              >
+            </div>
+            <div class="comparison-line">
+              <span id="register-summary">Initial state</span
+              ><span class="change-legend"><i></i>Latest changes</span>
+            </div>
+            <div id="reg-scroll">
+              <table id="reg-table">
+                <thead>
+                  <tr>
+                    <th>Register</th>
+                    <th>Value</th>
+                    <th>Previous</th>
+                  </tr>
+                </thead>
+                <tbody id="reg-body"></tbody>
+              </table>
+            </div>
+            <div id="flags-area" class="flags-row"></div>
+            <div class="watch-bar">
+              <label for="watch-register">Follow register</label
+              ><select id="watch-register">
+                <option value="">Choose…</option></select
+              ><button
+                id="watch-prev"
+                class="quiet"
+                aria-label="Previous register change"
+                title="Previous register change"
+              >
+                ↑</button
+              ><button
+                id="watch-next"
+                class="quiet"
+                aria-label="Next register change"
+                title="Next register change"
+              >
+                ↓
+              </button>
+            </div>
+          </section>
+          <section class="panel stack-panel" aria-labelledby="stack-title">
+            <div class="panel-heading">
+              <h2 id="stack-title">Stack memory</h2>
+              <div class="stack-controls">
+                <span id="stack-size" class="count"></span>
+                <select id="stack-format" aria-label="Stack display format">
+                  <option value="values">Values</option>
+                  <option value="bytes">Bytes</option>
+                </select>
+              </div>
+            </div>
+            <div class="comparison-line">
+              <span id="stack-address" class="mono">SP —</span
+              ><span class="change-legend"
+                ><i class="new-byte"></i>Newly visible</span
+              >
+            </div>
+            <div id="stack-scroll">
+              <table id="stack-table">
+                <thead>
+                  <tr>
+                    <th>Address</th>
+                    <th id="stack-value-heading">Value</th>
+                    <th>ASCII</th>
+                  </tr>
+                </thead>
+                <tbody id="stack-body"></tbody>
+              </table>
+            </div>
+            <div class="panel-footer">
+              <span id="stack-summary">No snapshot</span
+              ><span id="byte-order"></span>
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+    <footer class="status-bar">
+      <span id="status-msg" role="status">Ready when you are.</span
+      ><span id="status-detail">EMTR · Local trace viewer</span>
+    </footer>
+    <div id="drop-overlay" hidden>
+      <div>
+        <span aria-hidden="true">↓</span>
+        <h2>Drop to inspect</h2>
+        <p>Open an .emtr execution trace</p>
       </div>
     </div>
-
-    <!-- Stack panel -->
-    <div id="stack-panel" class="panel" style="border-right:none">
-      <div class="panel-title">
-        STACK
-        <span class="badge" id="stack-badge">SP: —</span>
+    <dialog id="help-dialog">
+      <div class="dialog-heading">
+        <h2>Keyboard shortcuts</h2>
+        <button id="help-close" class="quiet" aria-label="Close shortcuts">
+          ✕
+        </button>
       </div>
-      <div id="stack-scroll">
-        <table id="stack-table"><tbody id="stack-body"></tbody></table>
-      </div>
-    </div>
-
-  </div>
-</div>
-
-<!-- Status bar -->
-<div id="statusbar">
-  <span id="status-msg">Drop a .emtr file or click "Load"</span>
-  <span id="status-addr"></span>
-  <span id="status-opcode"></span>
-</div>
-
-<!-- Drop overlay -->
-<div id="drop-overlay">
-  <div id="drop-box">
-    <div id="drop-icon">🔬</div>
-    <div id="drop-title">EmuTrace Viewer</div>
-    <div id="drop-sub">Drop a <code>.emtr</code> file here, or click <strong>Load .emtr</strong></div>
-  </div>
-</div>
-
-<!-- Tooltip -->
-<div id="tooltip"></div>
-
-
-<script src="emu_viewer.js"></script>
-</body>
+      <dl>
+        <dt>Next / previous frame</dt>
+        <dd><kbd>→</kbd> <kbd>←</kbd></dd>
+        <dt>Play / pause</dt>
+        <dd><kbd>Space</kbd></dd>
+        <dt>First / last frame</dt>
+        <dd><kbd>Home</kbd> <kbd>End</kbd></dd>
+        <dt>Breakpoint frame</dt>
+        <dd><kbd>B</kbd></dd>
+        <dt>Find instruction</dt>
+        <dd><kbd>/</kbd></dd>
+        <dt>Next / previous match</dt>
+        <dd><kbd>Enter</kbd> <kbd>Shift Enter</kbd></dd>
+      </dl>
+      <p>
+        All state is captured before the selected instruction. Red register and
+        stack values remain highlighted until the next change in their
+        respective panel. Normal instruction-pointer advances do not clear
+        data-register highlights. The last instruction’s final effects are not
+        captured.
+      </p>
+    </dialog>
+  </body>
 </html>
